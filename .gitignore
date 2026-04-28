@@ -1,0 +1,47 @@
+# ── Data (large files — gitignored) ──────────────────────────────────────────
+data/raw/
+data/processed/
+data/noisy/
+
+# ── Outputs (generated at runtime — gitignored) ───────────────────────────────
+outputs/models/
+outputs/logs/
+outputs/metrics/
+outputs/plots/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# ── Jupyter checkpoints (but keep .ipynb files) ───────────────────────────────
+.ipynb_checkpoints/
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── OpenML cache ──────────────────────────────────────────────────────────────
+.openml/
+
+# ── Agent memory (internal — not for public repo) ─────────────────────────────
+CLAUDE.md

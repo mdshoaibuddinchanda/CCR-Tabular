@@ -1,0 +1,21 @@
+experiment_name: clean_run
+noise_type: none
+noise_rate: 0.0
+datasets:
+  - adult
+  - bank
+  - magic
+  - phoneme
+  - credit_g
+  - spambase
+models:
+  - mlp_standard
+  - mlp_focal
+  - mlp_weighted_ce
+  - mlp_smote
+  - xgboost_default
+  - xgboost_weighted
+  - lightgbm_default
+  - mlp_ccr
+seeds: [42, 123, 2024]
+n_folds: 5

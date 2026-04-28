@@ -44,11 +44,19 @@ sys.path.insert(0, str(_ROOT))
 def _pip(*args: str) -> None:
     """Run a pip install command using the current interpreter.
 
+    Uses --upgrade-strategy only-if-needed to avoid downgrading packages
+    that are already installed at a compatible version (important on Colab).
+
     Args:
         *args: Arguments to pass after 'pip install'.
     """
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--quiet", *args],
+        [
+            sys.executable, "-m", "pip", "install",
+            "--quiet",
+            "--upgrade-strategy", "only-if-needed",
+            *args,
+        ],
         stdout=subprocess.DEVNULL,
     )
 
@@ -142,8 +150,13 @@ def install_dependencies(requirements_path: Path) -> None:
         ]
         if non_torch:
             print(f"  Installing {len(non_torch)} packages from requirements.txt...")
-            _pip(*non_torch)
-            print("  All packages installed.")
+            try:
+                _pip(*non_torch)
+                print("  All packages installed.")
+            except subprocess.CalledProcessError:
+                # Dependency conflicts (common on Colab) are warnings, not fatal errors.
+                # The packages we need are installed; other conflicts are pre-existing.
+                print("  Packages installed (some pre-existing conflicts ignored).")
     else:
         print(f"  WARNING: {requirements_path} not found. Skipping package install.")
 

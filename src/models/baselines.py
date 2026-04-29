@@ -709,21 +709,28 @@ class LightGBMDefaultBaseline(BaselineModel):
             random_state=self.seed,
             verbose=-1,
         )
+        # Convert to DataFrame to avoid "feature names" warning during inference
+        import pandas as _pd
+        X_train_df = _pd.DataFrame(X_train)
+        X_val_df = _pd.DataFrame(X_val) if X_val is not None else None
+        eval_set_df = [(X_val_df, y_val)] if X_val_df is not None else None
         self.model.fit(
-            X_train, y_train,
-            eval_set=eval_set,
+            X_train_df, y_train,
+            eval_set=eval_set_df,
             callbacks=callbacks,
         )
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         if self.model is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
-        return self.model.predict(X)
+        import pandas as _pd
+        return self.model.predict(_pd.DataFrame(X))
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self.model is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
-        return self.model.predict_proba(X)
+        import pandas as _pd
+        return self.model.predict_proba(_pd.DataFrame(X))
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

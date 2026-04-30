@@ -1,13 +1,13 @@
-"""
-run_beta_sensitivity.py — CCR Beta Sensitivity Analysis
-========================================================
-Runs CCR with beta in {0.3, 0.5, 0.8} on ALL 6 datasets.
+﻿"""
+run_k_sensitivity.py â€” CCR K (History Window) Sensitivity Analysis
+===================================================================
+Runs CCR with K in {3, 5, 10} on ALL 6 datasets.
 Conditions: clean + asym@20% + asym@30%.
-5 folds x 3 seeds = 15 runs per (dataset, beta, condition).
-Total: 3 beta x 6 datasets x 3 conditions x 15 runs = 810 runs.
+5 folds x 3 seeds = 15 runs per (dataset, K, condition).
+Total: 3 K x 6 datasets x 3 conditions x 15 runs = 810 runs.
 
-Output: outputs/metrics/results_beta_sensitivity.csv
-Usage:  python run_beta_sensitivity.py
+Output: outputs/metrics/results_k_sensitivity.csv
+Usage:  python run_k_sensitivity.py
 """
 
 import gc
@@ -17,12 +17,12 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.load_data import load_dataset
 from src.loss.ccr_loss import CCRLoss
 from src.utils.config import (
-    DATASETS, K, N_FOLDS, OUTPUTS_METRICS, SEEDS, TAU,
+    BETA, DATASETS, N_FOLDS, OUTPUTS_METRICS, SEEDS, TAU,
 )
 from src.utils.experiment_utils import (
     append_row, evaluate_model, is_done,
@@ -34,37 +34,36 @@ from src.utils.reproducibility import get_device
 setup_logging(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-BETA_VALUES = [0.3, 0.5, 0.8]
-BETA_DATASETS = list(DATASETS.keys())  # all 6
+# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+K_VALUES = [3, 5, 10]
+K_DATASETS = list(DATASETS.keys())  # all 6
 NOISE_CONDITIONS = [
     ("none", 0.0),
     ("asym", 0.2),
     ("asym", 0.3),
 ]
-OUTPUT_CSV = OUTPUTS_METRICS / "results_beta_sensitivity.csv"
+OUTPUT_CSV = OUTPUTS_METRICS / "results_k_sensitivity.csv"
 
 
-def make_run_id(dataset, beta, noise_type, noise_rate, seed, fold):
-    beta_str = str(beta).replace(".", "_")
+def make_run_id(dataset, K, noise_type, noise_rate, seed, fold):
     rate_str = f"{int(noise_rate * 100):02d}"
-    return f"beta_{beta_str}_{dataset}_{noise_type}_{rate_str}_seed{seed}_fold{fold}"
+    return f"k{K}_{dataset}_{noise_type}_{rate_str}_seed{seed}_fold{fold}"
 
 
-def run_beta_sensitivity():
+def run_k_sensitivity():
     device = get_device()
-    total = len(BETA_VALUES) * len(BETA_DATASETS) * len(NOISE_CONDITIONS) * N_FOLDS * len(SEEDS)
+    total = len(K_VALUES) * len(K_DATASETS) * len(NOISE_CONDITIONS) * N_FOLDS * len(SEEDS)
     done = 0
 
     print("=" * 65, flush=True)
-    print("  CCR Beta Sensitivity Analysis", flush=True)
-    print(f"  Beta values: {BETA_VALUES}", flush=True)
-    print(f"  Datasets:    {BETA_DATASETS}", flush=True)
-    print(f"  Total runs:  {total}", flush=True)
-    print(f"  Device:      {device}", flush=True)
+    print("  CCR K Sensitivity Analysis", flush=True)
+    print(f"  K values:   {K_VALUES}", flush=True)
+    print(f"  Datasets:   {K_DATASETS}", flush=True)
+    print(f"  Total runs: {total}", flush=True)
+    print(f"  Device:     {device}", flush=True)
     print("=" * 65, flush=True)
 
-    for dataset_name in BETA_DATASETS:
+    for dataset_name in K_DATASETS:
         print(f"\nLoading {dataset_name}...", flush=True)
         df_data = load_dataset(dataset_name)
         feature_cols = [c for c in df_data.columns if c != "target"]
@@ -85,15 +84,15 @@ def run_beta_sensitivity():
                     n_majority = int(np.sum(y_tr == 0))
                     n_minority = int(np.sum(y_tr == 1))
 
-                    for beta in BETA_VALUES:
-                        run_id = make_run_id(dataset_name, beta, noise_type, noise_rate, seed, fold)
+                    for K in K_VALUES:
+                        run_id = make_run_id(dataset_name, K, noise_type, noise_rate, seed, fold)
 
                         if is_done(run_id, OUTPUT_CSV):
                             done += 1
                             continue
 
                         print(
-                            f"  [{done + 1}/{total}] {dataset_name} | beta={beta} | "
+                            f"  [{done + 1}/{total}] {dataset_name} | K={K} | "
                             f"{noise_type}@{noise_rate:.0%} | seed={seed} fold={fold}",
                             flush=True,
                         )
@@ -104,7 +103,7 @@ def run_beta_sensitivity():
                                 n_classes=2,
                                 class_counts=[n_majority, n_minority],
                                 tau=TAU,
-                                beta=beta,
+                                beta=BETA,
                                 K=K,
                                 device=device,
                             )
@@ -117,7 +116,7 @@ def run_beta_sensitivity():
                             append_row({
                                 "run_id":          run_id,
                                 "dataset":         dataset_name,
-                                "beta":            beta,
+                                "K":               K,
                                 "noise_type":      noise_type,
                                 "noise_rate":      noise_rate,
                                 "fold":            fold,
@@ -144,8 +143,8 @@ def run_beta_sensitivity():
                             torch.cuda.empty_cache()
                         gc.collect()
 
-    print(f"\n  Beta sensitivity complete. Results: {OUTPUT_CSV}", flush=True)
+    print(f"\n  K sensitivity complete. Results: {OUTPUT_CSV}", flush=True)
 
 
 if __name__ == "__main__":
-    run_beta_sensitivity()
+    run_k_sensitivity()

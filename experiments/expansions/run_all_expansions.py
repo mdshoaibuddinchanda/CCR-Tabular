@@ -1,8 +1,8 @@
-"""
-run_all_expansions.py — Master Expansion Experiment Runner
+﻿"""
+run_all_expansions.py â€” Master Expansion Experiment Runner
 ===========================================================
 Runs all expansion experiments in sequence after the main experiment completes.
-Each step is fully resumable — completed run_ids are skipped automatically.
+Each step is fully resumable â€” completed run_ids are skipped automatically.
 
 Sequence:
     1. Main experiments     (run via main.py first)
@@ -32,7 +32,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.utils.logger import setup_logging
 
@@ -129,27 +129,27 @@ def main():
     wall_start = time.perf_counter()
 
     # Step 1: Ablation
-    from run_ablation import run_ablation
+    from experiments.expansions.run_ablation import run_ablation
     run_step("Ablation study (2,520 runs)", run_ablation, skip=args.skip_ablation)
 
     # Step 2: Tau sensitivity
-    from run_tau_sensitivity import run_tau_sensitivity
+    from experiments.expansions.run_tau_sensitivity import run_tau_sensitivity
     run_step("Tau sensitivity (1,350 runs)", run_tau_sensitivity, skip=args.skip_tau)
 
     # Step 3: K sensitivity
-    from run_k_sensitivity import run_k_sensitivity
+    from experiments.expansions.run_k_sensitivity import run_k_sensitivity
     run_step("K sensitivity (810 runs)", run_k_sensitivity, skip=args.skip_k)
 
     # Step 4: Beta sensitivity
-    from run_beta_sensitivity import run_beta_sensitivity
+    from experiments.expansions.run_beta_sensitivity import run_beta_sensitivity
     run_step("Beta sensitivity (810 runs)", run_beta_sensitivity, skip=args.skip_beta)
 
     # Step 5: Noise@40%
-    from run_noise40 import run_noise40
+    from experiments.expansions.run_noise40 import run_noise40
     run_step("Noise@40% extension (720 runs)", run_noise40, skip=args.skip_noise40)
 
-    # Step 6: Learning curves (always run — fast log extraction, no training)
-    from run_learning_curves import extract_learning_curves
+    # Step 6: Learning curves (always run â€” fast log extraction, no training)
+    from experiments.expansions.run_learning_curves import extract_learning_curves
     run_step("Learning curves extraction", extract_learning_curves, skip=False)
 
     total_elapsed = time.perf_counter() - wall_start

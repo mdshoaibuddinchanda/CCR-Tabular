@@ -199,7 +199,7 @@ def prefetch_all_datasets() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_all_experiments(datasets: list[str] | None, models: list[str] | None) -> None:
-    """Run all experiments across all configs.
+    """Run all main experiments across all 7 noise configs.
 
     Args:
         datasets: Optional list of dataset names to restrict to.
@@ -214,7 +214,7 @@ def run_all_experiments(datasets: list[str] | None, models: list[str] | None) ->
     setup_logging()
 
     print("=" * 60, flush=True)
-    print("PHASE 3 — Running experiments", flush=True)
+    print("PHASE 3 — Main experiments (5,040 runs)", flush=True)
     print("=" * 60, flush=True)
 
     configs_dir = _ROOT / "experiments" / "configs"
@@ -409,3 +409,16 @@ if __name__ == "__main__":
         run_single(args)
     else:
         run_all_experiments(datasets=None, models=None)
+
+        # ── Phase 4: Expansion experiments ───────────────────────────────────
+        if not args.no_prefetch:  # only run expansions in full mode
+            print("=" * 60, flush=True)
+            print("PHASE 4 — Expansion experiments", flush=True)
+            print("  (ablation, tau/K/beta sensitivity, noise@40%, learning curves)", flush=True)
+            print("=" * 60, flush=True)
+            try:
+                from experiments.expansions.run_all_expansions import main as run_expansions
+                run_expansions()
+            except Exception as exc:
+                print(f"  WARNING: Expansion experiments failed: {exc}", flush=True)
+                print("  Run manually: python experiments/expansions/run_all_expansions.py", flush=True)

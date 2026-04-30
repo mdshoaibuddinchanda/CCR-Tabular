@@ -1,5 +1,5 @@
-"""
-run_noise40.py — Noise@40% Extension Experiment
+﻿"""
+run_noise40.py â€” Noise@40% Extension Experiment
 ================================================
 Runs ALL 8 models on ALL 6 datasets with asym@40% noise.
 Extends the main experiment to a harder noise level.
@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.training.cross_validation import run_cross_validation
 from src.utils.config import DATASETS, MODEL_NAMES, OUTPUTS_METRICS, SEEDS

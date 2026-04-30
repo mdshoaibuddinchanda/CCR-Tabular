@@ -44,4 +44,4 @@ Thumbs.db
 # ── Internal files — not for public repo ─────────────────────────────────────
 CLAUDE.md
 PROGRESS.md
-show_results.py
+scripts/show_results.py

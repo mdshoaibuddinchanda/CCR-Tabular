@@ -1,5 +1,5 @@
-"""
-run_tau_sensitivity.py — CCR Tau Sensitivity Analysis
+﻿"""
+run_tau_sensitivity.py â€” CCR Tau Sensitivity Analysis
 ======================================================
 Runs CCR with tau in {0.3, 0.5, 0.6, 0.7, 0.8} on ALL 6 datasets.
 Conditions: clean + asym@20% + asym@30%.
@@ -7,7 +7,7 @@ Conditions: clean + asym@20% + asym@30%.
 Total: 5 tau x 6 datasets x 3 conditions x 15 runs = 1,350 runs.
 
 Also logs gate activation rate (fraction of samples where p_i > tau fires,
-averaged over last 10 epochs) — the key diagnostic for tau calibration.
+averaged over last 10 epochs) â€” the key diagnostic for tau calibration.
 
 Output: outputs/metrics/results_tau_sensitivity.csv
 Usage:  python run_tau_sensitivity.py
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.load_data import load_dataset
 from src.loss.ccr_loss import CCRLoss
@@ -37,7 +37,7 @@ from src.utils.reproducibility import get_device
 setup_logging(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TAU_VALUES = [0.3, 0.5, 0.6, 0.7, 0.8]
 TAU_DATASETS = list(DATASETS.keys())  # all 6
 NOISE_CONDITIONS = [

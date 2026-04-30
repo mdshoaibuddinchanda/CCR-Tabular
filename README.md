@@ -8,7 +8,7 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.3.2-F7931E?style=for-the-badge&logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-33%20passed-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-49%20passed-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![Experiments](https://img.shields.io/badge/Experiments-5040%20runs-orange?style=for-the-badge)](outputs/)
 
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0.0-189fdd?style=flat-square)](https://xgboost.readthedocs.io/)
@@ -37,10 +37,11 @@ That single command:
 
 1. **Installs all dependencies** — detects your GPU and installs CUDA-accelerated or CPU PyTorch automatically
 2. **Downloads all 6 datasets** — from OpenML, cached locally after first run
-3. **Runs all experiments** — 6 datasets × 8 models × 7 noise configs × 5 folds × 3 seeds
+3. **Runs all main experiments** — 6 datasets × 8 models × 7 noise configs × 5 folds × 3 seeds (5,040 runs)
+4. **Runs all expansion experiments** — ablation, τ/K/β sensitivity, noise@40%, learning curves (~6,210 runs)
 
 > Already have deps installed? Use `python main.py --no_install` to skip step 1.
-> Already downloaded data? Use `python main.py --no_prefetch` to skip step 2.
+> Already downloaded data? Use `python main.py --no_prefetch` to skip step 2 (also skips step 4).
 
 ---
 
@@ -225,7 +226,7 @@ python main.py --dataset credit_g --model mlp_ccr --n_folds 2 --seeds 42
 conda run -n py312 python -m pytest tests/ -v
 ```
 
-> **Expected: 33 passed, 0 failed**| Test file | Coverage |
+> **Expected: 49 passed, 0 failed**| Test file | Coverage |
 |-----------|----------|
 | `test_ccr_loss.py` | Loss math, batch normalization, history buffer, variance cold-start, edge cases |
 | `test_noise_injection.py` | Majority labels never flipped, rate accuracy ±2%, reproducibility |
@@ -259,7 +260,7 @@ Three ablation variants are implemented in `src/loss/ccr_loss.py`:
 Run the full ablation study (all 6 datasets × 4 variants × 7 noise configs):
 
 ```bash
-python run_ablation.py
+python experiments/expansions/run_ablation.py
 ```
 
 ---
@@ -270,25 +271,25 @@ Additional sensitivity analyses for the paper:
 
 ```bash
 # Tau sensitivity: tau in {0.3, 0.5, 0.6, 0.7, 0.8}
-python run_tau_sensitivity.py
+python experiments/expansions/run_tau_sensitivity.py
 
 # K sensitivity: K in {3, 5, 10}
-python run_k_sensitivity.py
+python experiments/expansions/run_k_sensitivity.py
 
 # Beta sensitivity: beta in {0.3, 0.5, 0.8}
-python run_beta_sensitivity.py
+python experiments/expansions/run_beta_sensitivity.py
 
 # Noise@40% extension
-python run_noise40.py
+python experiments/expansions/run_noise40.py
 
 # Run all expansion experiments in sequence (resumable)
-python run_all_expansions.py
+python experiments/expansions/run_all_expansions.py
 
 # Gate calibration diagnostic
-python diagnose_gate.py
+python scripts/diagnose_gate.py
 
-# View results summary and paper claim verdicts
-python show_results.py
+# Generate paper figures (run after experiments complete)
+python scripts/paper_figures.py
 ```
 
 ---
@@ -324,62 +325,71 @@ accuracy | macro_f1 | minority_recall | auc_roc | auc_pr | timestamp
 ```text
 CCR-Tabular/
 │
-├── main.py                        ← Single entry point (install + download + run)
-├── requirements.txt
-├── CLAUDE.md                      ← Agent memory / project rules
+├── main.py                        ← Single entry point: install + download + ALL experiments
+├── requirements.txt               ← Pinned dependencies
+│
+├── src/                           ← All library code (importable from anywhere)
+│   ├── data/
+│   │   ├── load_data.py           ← OpenML download + binary encoding + local cache
+│   │   ├── preprocess.py          ← Leakage-safe ColumnTransformer (fit on train only)
+│   │   └── noise_injection.py     ← Asymmetric + feature-correlated label noise
+│   ├── loss/
+│   │   └── ccr_loss.py            ← CCRLoss + 3 ablation variants + get_ccr_loss() factory
+│   ├── models/
+│   │   ├── mlp.py                 ← TabularMLP + TabularDataset + get_mlp_for_dataset()
+│   │   └── baselines.py           ← 7 baselines (B1-B7) + get_baseline() factory
+│   ├── training/
+│   │   ├── train.py               ← Single-fold training loop (early stop on macro F1)
+│   │   ├── evaluate.py            ← Test inference + results.csv writer
+│   │   └── cross_validation.py    ← 5-fold × 3-seed CV orchestration
+│   └── utils/
+│       ├── config.py              ← ALL hyperparams + paths (single source of truth)
+│       ├── reproducibility.py     ← fix_all_seeds() + get_device() (cuda→mps→cpu)
+│       ├── logger.py              ← Structured JSON + stdout logging
+│       ├── metrics.py             ← accuracy, macro_f1, minority_recall, AUC-ROC, AUC-PR
+│       ├── statistics.py          ← Wilcoxon signed-rank tests (p < 0.05)
+│       └── experiment_utils.py    ← Shared helpers for all expansion scripts
+│
+├── experiments/
+│   ├── configs/                   ← 7 YAML noise configs (read by main.py Phase 3)
+│   │   ├── clean_run.yaml         ← No noise
+│   │   ├── noisy_asym_10.yaml     ← Asymmetric 10%
+│   │   ├── noisy_asym_20.yaml     ← Asymmetric 20%
+│   │   ├── noisy_asym_30.yaml     ← Asymmetric 30%
+│   │   ├── noisy_feat_10.yaml     ← Feature-correlated 10%
+│   │   ├── noisy_feat_20.yaml     ← Feature-correlated 20%
+│   │   └── noisy_feat_30.yaml     ← Feature-correlated 30%
+│   ├── run_experiments.py         ← Main experiment runner (called by main.py Phase 3)
+│   └── expansions/                ← Sensitivity analyses (called by main.py Phase 4)
+│       ├── run_all_expansions.py  ← Master runner — orchestrates all expansion steps
+│       ├── run_ablation.py        ← 4 CCR variants × 6 datasets × 7 configs (2,520 runs)
+│       ├── run_tau_sensitivity.py ← τ ∈ {0.3, 0.5, 0.6, 0.7, 0.8} (1,350 runs)
+│       ├── run_k_sensitivity.py   ← K ∈ {3, 5, 10} (810 runs)
+│       ├── run_beta_sensitivity.py← β ∈ {0.3, 0.5, 0.8} (810 runs)
+│       ├── run_noise40.py         ← All 8 models at asym@40% (720 runs)
+│       └── run_learning_curves.py ← Extract per-epoch F1 from logs (no training)
+│
+├── scripts/                       ← Analysis utilities (not called by main.py)
+│   ├── paper_figures.py           ← Publication figures (600 DPI PNG + PDF)
+│   └── diagnose_gate.py           ← Gate activation diagnostic (τ calibration)
 │
 ├── data/
 │   ├── raw/                       ← Downloaded CSVs (gitignored)
 │   ├── processed/                 ← Encoded datasets (gitignored)
-│   └── noisy/                     ← Noise-injected train splits (gitignored)
+│   └── noisy/                     ← Noise-injected splits (gitignored)
 │
-├── src/
-│   ├── data/
-│   │   ├── load_data.py           ← OpenML download + binary encoding
-│   │   ├── preprocess.py          ← Leakage-safe ColumnTransformer pipeline
-│   │   └── noise_injection.py     ← Asymmetric + feature-correlated noise
-│   ├── loss/
-│   │   └── ccr_loss.py            ← CCRLoss (core contribution)
-│   ├── models/
-│   │   ├── mlp.py                 ← TabularMLP + TabularDataset
-│   │   └── baselines.py           ← All 7 baselines + factory
-│   ├── training/
-│   │   ├── train.py               ← Single-fold training loop
-│   │   ├── evaluate.py            ← Test inference + results.csv writer
-│   │   └── cross_validation.py    ← 5-fold × 3-seed CV orchestration
-│   └── utils/
-│       ├── config.py              ← All hyperparameters and paths
-│       ├── reproducibility.py     ← Seed fixing + device detection
-│       ├── logger.py              ← Structured JSON + stdout logging
-│       ├── metrics.py             ← accuracy, macro_f1, recall, AUC-ROC, AUC-PR
-│       └── statistics.py          ← Wilcoxon signed-rank tests (IEEE TNNLS requirement)
+├── outputs/                       ← All generated outputs (gitignored)
+│   ├── models/                    ← Checkpoints (.pt / .pkl)
+│   ├── logs/                      ← Per-run JSON training logs
+│   ├── metrics/                   ← results.csv + all sensitivity CSVs
+│   └── plots/                     ← Figures (PNG + PDF)
 │
-├── experiments/
-│   ├── configs/                   ← 7 YAML experiment configs
-│   │   ├── clean_run.yaml
-│   │   ├── noisy_asym_10.yaml
-│   │   ├── noisy_asym_20.yaml
-│   │   ├── noisy_asym_30.yaml
-│   │   ├── noisy_feat_10.yaml
-│   │   ├── noisy_feat_20.yaml
-│   │   └── noisy_feat_30.yaml
-│   └── run_experiments.py         ← Master runner with resume support
-│
-├── paper_figures.py               ← Publication figures (600 DPI PNG + PDF)
-├── run_ablation.py                ← Ablation study (4 CCR variants × all 6 datasets)
-├── run_tau_sensitivity.py         ← τ sensitivity (τ ∈ {0.3, 0.5, 0.6, 0.7, 0.8})
-├── run_k_sensitivity.py           ← K sensitivity (K ∈ {3, 5, 10})
-├── run_beta_sensitivity.py        ← β sensitivity (β ∈ {0.3, 0.5, 0.8})
-├── run_noise40.py                 ← Noise@40% extension experiment
-├── run_learning_curves.py         ← Extract per-epoch F1 from logs
-├── run_all_expansions.py          ← Master runner for all expansion experiments
-├── diagnose_gate.py               ← Gate activation diagnostic (τ calibration)
-├── show_results.py                ← Print results summary and paper claim verdicts
-│
-└── tests/    ├── test_ccr_loss.py
-    ├── test_noise_injection.py
-    ├── test_metrics.py
-    └── test_data_leakage.py
+└── tests/
+    ├── test_ccr_loss.py           ← CCR loss math, history buffer, edge cases
+    ├── test_noise_injection.py    ← Noise correctness, majority never flipped
+    ├── test_metrics.py            ← Metric computation correctness
+    ├── test_data_leakage.py       ← Leakage prevention assertions
+    └── test_experiment_utils.py   ← Shared utility functions
 ```
 
 ---

@@ -1,5 +1,5 @@
-"""
-run_learning_curves.py — Extract Learning Curves from Training Logs
+﻿"""
+run_learning_curves.py â€” Extract Learning Curves from Training Logs
 ====================================================================
 Extracts per-epoch validation Macro F1 for CCR under asym@30% noise
 from the JSON training logs generated during the main experiment run.
@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.utils.config import DATASETS, N_FOLDS, OUTPUTS_LOGS, OUTPUTS_METRICS, SEEDS
 from src.utils.logger import setup_logging

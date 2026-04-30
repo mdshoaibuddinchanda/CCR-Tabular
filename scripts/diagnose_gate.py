@@ -1,5 +1,5 @@
-"""
-diagnose_gate.py — CCR Confidence Gate Diagnostic
+﻿"""
+diagnose_gate.py â€” CCR Confidence Gate Diagnostic
 ===================================================
 Measures the fraction of samples per batch where p_i > tau fires.
 If consistently > 90%, the gate is always on and contributes nothing.
@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.load_data import load_dataset
 from src.data.noise_injection import inject_asymmetric_noise
@@ -124,11 +124,11 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
             optimizer.zero_grad()
             logits = model(X_b)
 
-            # ── Compute p_i (prob of true class) ─────────────────────────────
+            # â”€â”€ Compute p_i (prob of true class) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             probs = F.softmax(logits, dim=1)
             p_i = probs[torch.arange(len(y_b), device=device), y_b]
 
-            # ── Gate activation fraction ──────────────────────────────────────
+            # â”€â”€ Gate activation fraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             gate_fired = (p_i > TAU).float()
             gate_frac  = gate_fired.mean().item()
             gate_fracs.append(gate_frac)
@@ -195,7 +195,7 @@ def main():
     df_out.to_csv(OUTPUT_CSV, index=False)
     print(f"\n  Full results saved to {OUTPUT_CSV}")
 
-    # ── Summary verdict ───────────────────────────────────────────────────────
+    # â”€â”€ Summary verdict â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     print()
     print("=" * 65)
     print("  GATE DIAGNOSTIC VERDICT")
@@ -217,18 +217,18 @@ def main():
         print()
         print("  FINDING: Gate fires on >90% of samples consistently.")
         print("  The indicator I(p_i > tau) is almost always 1.")
-        print("  tau=0.3 is too low — most samples exceed it after a few epochs.")
+        print("  tau=0.3 is too low â€” most samples exceed it after a few epochs.")
         print("  The gate is effectively disabled. Variance term applies to all samples.")
         print()
         print("  RECOMMENDATION:")
         print("  1. Report this honestly in the paper as a calibration finding.")
         print("  2. Suggest tau should be tuned per dataset or set higher (e.g. 0.6-0.7).")
-        print("  3. The variance term still contributes — just without selective gating.")
+        print("  3. The variance term still contributes â€” just without selective gating.")
     elif overall_gate < 0.50:
         print()
         print("  FINDING: Gate fires on <50% of samples.")
         print("  The gate is actively suppressing noisy/uncertain samples.")
-        print("  This is the intended behavior — mechanism is working correctly.")
+        print("  This is the intended behavior â€” mechanism is working correctly.")
     else:
         print()
         print("  FINDING: Gate fires on 50-90% of samples.")

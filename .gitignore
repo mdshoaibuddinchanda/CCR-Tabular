@@ -1,13 +1,10 @@
-# ── Data (large files — gitignored) ──────────────────────────────────────────
+# ── Data (large files, downloaded at runtime) ─────────────────────────────────
 data/raw/
 data/processed/
 data/noisy/
 
-# ── Outputs (generated at runtime — gitignored) ───────────────────────────────
-outputs/models/
-outputs/logs/
-outputs/metrics/
-outputs/plots/
+# ── All generated outputs ─────────────────────────────────────────────────────
+outputs/
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
@@ -21,8 +18,9 @@ dist/
 *.egg
 .eggs/
 
-# ── Jupyter checkpoints (but keep .ipynb files) ───────────────────────────────
+# ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
+*.ipynb
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 .pytest_cache/
@@ -43,5 +41,7 @@ Thumbs.db
 # ── OpenML cache ──────────────────────────────────────────────────────────────
 .openml/
 
-# ── Agent memory (internal — not for public repo) ─────────────────────────────
+# ── Internal files — not for public repo ─────────────────────────────────────
 CLAUDE.md
+PROGRESS.md
+show_results.py

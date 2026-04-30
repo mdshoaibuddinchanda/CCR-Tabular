@@ -1,23 +1,9 @@
 ﻿"""
-paper_figures.py — CCR-Tabular Publication Figure Generator
-============================================================
-Generates all tables and figures needed for the IEEE TNNLS paper.
-
-Usage:
-    python paper_figures.py
-
-Outputs (outputs/plots/):
-    fig1_main_results.png / .pdf        — Main results table as heatmap
-    fig2_noise_degradation_asym.png/.pdf — F1 degradation under asymmetric noise
-    fig3_noise_degradation_feat.png/.pdf — F1 degradation under feature-correlated noise
-    fig4_minority_recall_bar.png/.pdf   — Minority recall comparison (clean + noisy)
-    fig5_improvement_heatmap.png/.pdf   — CCR delta over best baseline
-    fig6_training_time.png/.pdf         — Training time comparison
-    table1_clean_results.csv            — LaTeX-ready main results table
-    table2_noise_results.csv            — LaTeX-ready noise results table
+paper_figures.py - CCR-Tabular Publication Figure Generator
+Run: python paper_figures.py
+Outputs: outputs/plots/  and  outputs/metrics/
 """
 
-import sys
 import warnings
 from pathlib import Path
 
@@ -32,13 +18,14 @@ import seaborn as sns
 
 warnings.filterwarnings("ignore")
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT   = Path(__file__).parent
-PLOTS  = ROOT / "outputs" / "plots"
+ROOT    = Path(__file__).parent
+PLOTS   = ROOT / "outputs" / "plots"
 METRICS = ROOT / "outputs" / "metrics"
 PLOTS.mkdir(parents=True, exist_ok=True)
 
-# ── Global style — IEEE-compatible ────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Style - IEEE serif, clean, generous whitespace
+# ---------------------------------------------------------------------------
 plt.rcParams.update({
     "font.family":        "serif",
     "font.serif":         ["Times New Roman", "DejaVu Serif"],
@@ -51,23 +38,30 @@ plt.rcParams.update({
     "figure.dpi":         150,
     "savefig.dpi":        600,
     "savefig.bbox":       "tight",
-    "savefig.pad_inches": 0.05,
-    "axes.linewidth":     0.8,
-    "grid.linewidth":     0.5,
-    "lines.linewidth":    1.5,
-    "lines.markersize":   5,
+    "savefig.pad_inches": 0.08,
+    "axes.linewidth":     0.6,
     "axes.spines.top":    False,
     "axes.spines.right":  False,
+    "axes.grid":          True,
+    "grid.color":         "#e8e8e8",
+    "grid.linewidth":     0.5,
+    "lines.linewidth":    1.6,
+    "lines.markersize":   5,
+    "xtick.major.size":   3,
+    "ytick.major.size":   3,
+    "xtick.major.width":  0.6,
+    "ytick.major.width":  0.6,
+    "xtick.major.pad":    3,
+    "ytick.major.pad":    3,
 })
 
-DPI_SAVE = 600
+DPI = 600
 
-# ── Model display names & colors ──────────────────────────────────────────────
 MODEL_ORDER = [
     "mlp_standard", "mlp_focal", "mlp_weighted_ce", "mlp_smote",
     "xgboost_default", "xgboost_weighted", "lightgbm_default", "mlp_ccr",
 ]
-MODEL_LABELS = {
+LABELS = {
     "mlp_standard":    "MLP-CE",
     "mlp_focal":       "MLP-Focal",
     "mlp_weighted_ce": "MLP-WCE",
@@ -77,17 +71,17 @@ MODEL_LABELS = {
     "lightgbm_default":"LightGBM",
     "mlp_ccr":         "CCR (Ours)",
 }
-MODEL_COLORS = {
+COLORS = {
     "mlp_standard":    "#adb5bd",
     "mlp_focal":       "#4895ef",
-    "mlp_weighted_ce": "#4cc9f0",
-    "mlp_smote":       "#f77f00",
-    "xgboost_default": "#7b2d8b",
-    "xgboost_weighted":"#b5179e",
-    "lightgbm_default":"#06d6a0",
-    "mlp_ccr":         "#d62828",
+    "mlp_weighted_ce": "#43aa8b",
+    "mlp_smote":       "#f4a261",
+    "xgboost_default": "#9b72cf",
+    "xgboost_weighted":"#c77dff",
+    "lightgbm_default":"#48cae4",
+    "mlp_ccr":         "#e63946",
 }
-MODEL_MARKERS = {
+MARKERS = {
     "mlp_standard":    "o",
     "mlp_focal":       "s",
     "mlp_weighted_ce": "^",
@@ -98,7 +92,8 @@ MODEL_MARKERS = {
     "mlp_ccr":         "*",
 }
 
-DATASET_LABELS = {
+DS_ORDER  = ["adult", "bank", "credit_g", "magic", "phoneme", "spambase"]
+DS_LABELS = {
     "adult":    "Adult",
     "bank":     "Bank",
     "credit_g": "Credit-G",
@@ -106,432 +101,261 @@ DATASET_LABELS = {
     "phoneme":  "Phoneme",
     "spambase": "Spambase",
 }
-DATASETS = ["adult", "bank", "credit_g", "magic", "phoneme", "spambase"]
-
-NOISE_RATES = [0.0, 0.1, 0.2, 0.3]
-
-
-def save(fig, name):
-    """Save figure as both PNG and PDF at 600 DPI."""
-    for ext in ("png", "pdf"):
-        path = PLOTS / f"{name}.{ext}"
-        fig.savefig(path, dpi=DPI_SAVE, format=ext)
-    print(f"  Saved {name}.png / .pdf")
-    plt.close(fig)
 
 
 def load_data():
     p = METRICS / "results.csv"
     if not p.exists():
-        raise FileNotFoundError(f"results.csv not found at {p}. Run experiments first.")
+        raise FileNotFoundError(f"results.csv not found at {p}")
     df = pd.read_csv(p)
-    print(f"Loaded {len(df)} rows from results.csv")
+    print(f"Loaded {len(df):,} rows.")
     return df
 
 
-def agg(df, noise_type, noise_rate, metric):
-    """Return mean ± std per (dataset, model) for a given condition."""
-    mask = (df["noise_type"] == noise_type) & (df["noise_rate"].round(3) == round(noise_rate, 3))
-    g = df[mask].groupby(["dataset", "model"])[metric]
-    return g.mean().rename("mean").reset_index().merge(
-        g.std().rename("std").reset_index(), on=["dataset", "model"]
+def get(df, noise_type, noise_rate, metric, model=None, dataset=None):
+    mask = (
+        (df["noise_type"] == noise_type) &
+        (df["noise_rate"].round(3) == round(noise_rate, 3))
     )
+    if model:
+        mask &= df["model"] == model
+    if dataset:
+        mask &= df["dataset"] == dataset
+    return df[mask][metric]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 1 — Main results bar chart: Macro F1 and Minority Recall (clean data)
-# Layout: 2 rows × 6 cols  (top=F1, bottom=Recall), one column per dataset
-# Size: 7.0 × 4.5 inches  (fits a two-column IEEE page)
-# ══════════════════════════════════════════════════════════════════════════════
-def fig1_main_results(df):
-    print("Generating Figure 1 — Main results (clean data)...")
+def save(fig, name):
+    for ext in ("png", "pdf"):
+        fig.savefig(PLOTS / f"{name}.{ext}", dpi=DPI, format=ext)
+    plt.close(fig)
+    print(f"  -> {name}.png / .pdf")
 
-    metrics = [("macro_f1", "Macro F1"), ("minority_recall", "Minority Recall")]
-    n_ds = len(DATASETS)
-    n_models = len(MODEL_ORDER)
-    x = np.arange(n_models)
-    bar_w = 0.65
 
-    fig, axes = plt.subplots(
-        2, n_ds,
-        figsize=(7.0, 4.5),
-        sharey="row",
-        gridspec_kw={"hspace": 0.45, "wspace": 0.08},
-    )
+def patches(models):
+    return [mpatches.Patch(color=COLORS[m], label=LABELS[m]) for m in models]
 
-    for row, (metric, ylabel) in enumerate(metrics):
-        data = agg(df, "none", 0.0, metric)
-        for col, ds in enumerate(DATASETS):
-            ax = axes[row, col]
-            sub = data[data["dataset"] == ds].set_index("model")
 
-            means = [sub.loc[m, "mean"] if m in sub.index else 0.0 for m in MODEL_ORDER]
-            stds  = [sub.loc[m, "std"]  if m in sub.index else 0.0 for m in MODEL_ORDER]
-            colors = [MODEL_COLORS[m] for m in MODEL_ORDER]
+# ---------------------------------------------------------------------------
+# FIG 1  Clean-data grouped bar chart
+# Layout: 1 row x 6 datasets, two metrics side by side per dataset
+# Each subplot has exactly 8 bars with NO x-axis labels (legend only)
+# Figure is TALL enough so bars never crowd
+# ---------------------------------------------------------------------------
+def fig1_clean_results(df):
+    print("Fig 1 - Clean results...")
 
-            bars = ax.bar(x, means, bar_w, yerr=stds, capsize=2,
-                          color=colors, edgecolor="white", linewidth=0.4,
-                          error_kw={"linewidth": 0.8, "ecolor": "#555"})
+    for metric, ylabel, fname in [
+        ("macro_f1",        "Macro F1",        "fig1a_macro_f1"),
+        ("minority_recall", "Minority Recall", "fig1b_minority_recall"),
+    ]:
+        # One row, 6 columns - each column is one dataset
+        # Tall enough: 3.8 in height gives bars room to breathe
+        fig, axes = plt.subplots(
+            1, 6,
+            figsize=(10.0, 3.8),
+            gridspec_kw={"wspace": 0.18},
+        )
 
-            # Bold border on CCR bar
-            ccr_idx = MODEL_ORDER.index("mlp_ccr")
-            bars[ccr_idx].set_edgecolor("#000")
-            bars[ccr_idx].set_linewidth(1.5)
+        n_m = len(MODEL_ORDER)
+        x   = np.arange(n_m)
+        bw  = 0.62
 
+        for col, ds in enumerate(DS_ORDER):
+            ax = axes[col]
+            sub = df[(df["noise_type"] == "none") & (df["dataset"] == ds)]
+
+            means  = [sub[sub["model"] == m][metric].mean() for m in MODEL_ORDER]
+            colors = [COLORS[m] for m in MODEL_ORDER]
+
+            bars = ax.bar(x, means, bw, color=colors, edgecolor="none", zorder=3)
+
+            # CCR gets a thin black outline so it stands out
+            ccr_i = MODEL_ORDER.index("mlp_ccr")
+            bars[ccr_i].set_edgecolor("#111")
+            bars[ccr_i].set_linewidth(1.0)
+
+            ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
             ax.set_xticks([])
-            ax.set_xlim(-0.5, n_models - 0.5)
-            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+            ax.set_xlim(-0.6, n_m - 0.4)
             ax.yaxis.set_major_locator(mticker.MaxNLocator(4, prune="both"))
-            ax.tick_params(axis="y", labelsize=7)
-            ax.grid(axis="y", linewidth=0.4, alpha=0.6)
+            ax.tick_params(axis="y", labelsize=7.5, length=3, width=0.6, pad=2)
+            ax.spines["left"].set_linewidth(0.6)
+            ax.spines["bottom"].set_linewidth(0.6)
+            ax.grid(axis="y", linewidth=0.4, alpha=0.9, zorder=0)
+            ax.grid(axis="x", visible=False)
 
-            if row == 0:
-                ax.set_title(DATASET_LABELS[ds], fontsize=9, fontweight="bold", pad=3)
             if col == 0:
-                ax.set_ylabel(ylabel, fontsize=8)
+                ax.set_ylabel(ylabel, fontsize=9, labelpad=4)
 
-    # Shared legend below the figure
-    patches = [mpatches.Patch(color=MODEL_COLORS[m], label=MODEL_LABELS[m])
-               for m in MODEL_ORDER]
-    fig.legend(handles=patches, loc="lower center", ncol=4,
-               fontsize=7.5, frameon=True, framealpha=0.9,
-               bbox_to_anchor=(0.5, -0.04), columnspacing=0.8, handlelength=1.2)
+        # Legend below - 4 items per row = 2 rows, plenty of space
+        fig.legend(
+            handles=patches(MODEL_ORDER),
+            loc="lower center",
+            ncol=4,
+            fontsize=8,
+            frameon=False,
+            bbox_to_anchor=(0.5, -0.12),
+            columnspacing=1.0,
+            handlelength=1.2,
+            handletextpad=0.5,
+        )
 
-    fig.suptitle("Macro F1 and Minority Recall — Clean Labels",
-                 fontsize=10, fontweight="bold", y=1.01)
-    save(fig, "fig1_main_results")
+        fig.suptitle(
+            f"{ylabel} on Clean Data  (Mean, 5-fold x 3-seed CV)",
+            fontsize=10, fontweight="bold", y=1.02,
+        )
+        save(fig, fname)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 2 — Noise degradation curves: Asymmetric noise
-# Layout: 2 rows × 3 cols  (top=F1, bottom=Recall), 3 datasets per row
-# Size: 7.0 × 4.5 inches
-# ══════════════════════════════════════════════════════════════════════════════
-def fig_noise_degradation(df, noise_type, label, fname):
-    print(f"Generating noise degradation figure — {label}...")
+# ---------------------------------------------------------------------------
+# FIG 2  Noise degradation line plots
+# Layout: 2 rows x 3 cols, one subplot per dataset
+# Only 5 models shown - keeps lines readable
+# ---------------------------------------------------------------------------
+def fig2_noise_degradation(df, noise_type, label, fname):
+    print(f"Fig 2 - Noise degradation ({label})...")
 
-    metrics = [("macro_f1", "Macro F1"), ("minority_recall", "Minority Recall")]
-    rates = [0.0, 0.1, 0.2, 0.3]
-    # Show only the most informative models to keep the plot readable
     focus = ["mlp_ccr", "mlp_weighted_ce", "mlp_focal",
              "xgboost_weighted", "lightgbm_default"]
+    rates = [0.0, 0.1, 0.2, 0.3]
 
     fig, axes = plt.subplots(
         2, 3,
-        figsize=(7.0, 4.5),
-        sharey="row",
-        gridspec_kw={"hspace": 0.45, "wspace": 0.12},
+        figsize=(7.5, 5.0),
+        gridspec_kw={"hspace": 0.55, "wspace": 0.32},
     )
 
-    for row, (metric, ylabel) in enumerate(metrics):
-        for col, ds in enumerate(DATASETS[:3] if row == 0 else DATASETS[3:]):
-            # row 0 → first 3 datasets, row 1 → last 3 datasets
-            pass
-
-    # Redo with correct dataset assignment
-    ds_rows = [DATASETS[:3], DATASETS[3:]]
-
-    for row, (metric, ylabel) in enumerate(metrics):
-        for col, ds in enumerate(DATASETS):
-            ax_row = row
-            ax_col = col if col < 3 else col - 3
-            # We need a 2×6 layout for this to work cleanly
-            pass
-
-    plt.close(fig)
-
-    # Cleaner approach: 2 rows × 3 cols, top row = first 3 datasets, bottom = last 3
-    fig, axes = plt.subplots(
-        2, 3,
-        figsize=(7.0, 4.5),
-        gridspec_kw={"hspace": 0.50, "wspace": 0.25},
-    )
-
-    for panel_row, ds_group in enumerate([DATASETS[:3], DATASETS[3:]]):
-        for panel_col, ds in enumerate(ds_group):
-            ax = axes[panel_row, panel_col]
+    for row, ds_group in enumerate([DS_ORDER[:3], DS_ORDER[3:]]):
+        for col, ds in enumerate(ds_group):
+            ax = axes[row, col]
 
             for m in focus:
-                means, errs, xs = [], [], []
-                for rate in rates:
-                    nt = "none" if rate == 0.0 else noise_type
-                    sub = df[(df["dataset"] == ds) &
-                             (df["model"] == m) &
-                             (df["noise_type"] == nt) &
-                             (df["noise_rate"].round(3) == round(rate, 3))]["macro_f1"]
-                    if len(sub) > 0:
-                        means.append(sub.mean())
-                        errs.append(sub.std())
-                        xs.append(rate)
+                xs, ys, es = [], [], []
+                for r in rates:
+                    nt = "none" if r == 0.0 else noise_type
+                    s = get(df, nt, r, "macro_f1", model=m, dataset=ds)
+                    if len(s):
+                        xs.append(r)
+                        ys.append(s.mean())
+                        es.append(s.std())
+                if not xs:
+                    continue
 
-                if means:
-                    lw = 2.2 if m == "mlp_ccr" else 1.2
-                    ls = "-" if m == "mlp_ccr" else "--"
-                    zorder = 5 if m == "mlp_ccr" else 2
-                    ax.plot(xs, means,
-                            color=MODEL_COLORS[m],
-                            marker=MODEL_MARKERS[m],
-                            markersize=4 if m == "mlp_ccr" else 3,
-                            linewidth=lw, linestyle=ls,
-                            zorder=zorder,
-                            label=MODEL_LABELS[m])
-                    ax.fill_between(xs,
-                                    [v - e for v, e in zip(means, errs)],
-                                    [v + e for v, e in zip(means, errs)],
-                                    alpha=0.10, color=MODEL_COLORS[m], zorder=1)
+                lw = 2.0 if m == "mlp_ccr" else 1.0
+                ls = "-"  if m == "mlp_ccr" else "--"
+                zo = 5    if m == "mlp_ccr" else 2
+                ms = 6    if m == "mlp_ccr" else 4
+                ax.plot(xs, ys, color=COLORS[m], marker=MARKERS[m],
+                        linewidth=lw, linestyle=ls, markersize=ms, zorder=zo)
+                ax.fill_between(
+                    xs,
+                    [v - e for v, e in zip(ys, es)],
+                    [v + e for v, e in zip(ys, es)],
+                    alpha=0.07, color=COLORS[m], zorder=1,
+                )
 
-            ax.set_title(DATASET_LABELS[ds], fontsize=9, fontweight="bold", pad=3)
-            ax.set_xlabel("Noise Rate", fontsize=8)
-            if panel_col == 0:
-                ax.set_ylabel("Macro F1", fontsize=8)
+            ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
+            ax.set_xlabel("Noise Rate", fontsize=8, labelpad=3)
             ax.set_xlim(-0.02, 0.32)
             ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
             ax.xaxis.set_major_locator(mticker.FixedLocator([0.0, 0.1, 0.2, 0.3]))
             ax.yaxis.set_major_locator(mticker.MaxNLocator(4, prune="both"))
-            ax.tick_params(labelsize=7)
-            ax.grid(linewidth=0.4, alpha=0.5)
+            ax.tick_params(labelsize=7.5, length=3, width=0.6, pad=2)
+            ax.spines["left"].set_linewidth(0.6)
+            ax.spines["bottom"].set_linewidth(0.6)
+            if col == 0:
+                ax.set_ylabel("Macro F1", fontsize=9, labelpad=4)
 
-    # Legend
-    handles = [mpatches.Patch(color=MODEL_COLORS[m], label=MODEL_LABELS[m])
-               for m in focus]
-    fig.legend(handles=handles, loc="lower center", ncol=5,
-               fontsize=7.5, frameon=True, framealpha=0.9,
-               bbox_to_anchor=(0.5, -0.04), columnspacing=0.6, handlelength=1.2)
-
-    fig.suptitle(f"Macro F1 Degradation — {label} Noise",
-                 fontsize=10, fontweight="bold", y=1.01)
+    fig.legend(
+        handles=patches(focus),
+        loc="lower center", ncol=5,
+        fontsize=8, frameon=False,
+        bbox_to_anchor=(0.5, -0.06),
+        columnspacing=0.8, handlelength=1.2, handletextpad=0.5,
+    )
+    fig.suptitle(
+        f"Macro F1 Degradation - {label} Noise",
+        fontsize=10, fontweight="bold", y=1.01,
+    )
     save(fig, fname)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 3 — CCR vs Best Baseline: Minority Recall across noise levels
-# Layout: 1 row × 6 cols, grouped bars at each noise rate
-# Size: 7.0 × 3.0 inches
-# ══════════════════════════════════════════════════════════════════════════════
-def fig3_recall_comparison(df):
-    print("Generating Figure 3 — Minority Recall comparison...")
+# ---------------------------------------------------------------------------
+# FIG 3  Minority Recall degradation (asymmetric noise)
+# Same layout as Fig 2
+# ---------------------------------------------------------------------------
+def fig3_minority_recall(df):
+    print("Fig 3 - Minority Recall degradation...")
 
-    noise_configs = [
-        ("none", 0.0, "Clean"),
-        ("asym", 0.1, "Asym 10%"),
-        ("asym", 0.2, "Asym 20%"),
-        ("asym", 0.3, "Asym 30%"),
-    ]
-    focus_models = ["mlp_ccr", "mlp_weighted_ce", "mlp_smote",
-                    "xgboost_weighted", "lightgbm_default"]
-    n_configs = len(noise_configs)
-    n_models  = len(focus_models)
-    group_w   = 0.75
-    bar_w     = group_w / n_models
+    focus = ["mlp_ccr", "mlp_weighted_ce", "mlp_smote",
+             "xgboost_weighted", "lightgbm_default"]
+    rates = [0.0, 0.1, 0.2, 0.3]
 
     fig, axes = plt.subplots(
-        1, len(DATASETS),
-        figsize=(7.0, 3.0),
-        sharey=True,
-        gridspec_kw={"wspace": 0.06},
+        2, 3,
+        figsize=(7.5, 5.0),
+        gridspec_kw={"hspace": 0.55, "wspace": 0.32},
     )
 
-    for col, ds in enumerate(DATASETS):
-        ax = axes[col]
-        for mi, m in enumerate(focus_models):
-            xs, ys, es = [], [], []
-            for ci, (nt, nr, _) in enumerate(noise_configs):
-                sub = df[(df["dataset"] == ds) &
-                         (df["model"] == m) &
-                         (df["noise_type"] == nt) &
-                         (df["noise_rate"].round(3) == round(nr, 3))]["minority_recall"]
-                if len(sub) > 0:
-                    xs.append(ci + (mi - n_models / 2 + 0.5) * bar_w)
-                    ys.append(sub.mean())
-                    es.append(sub.std())
+    for row, ds_group in enumerate([DS_ORDER[:3], DS_ORDER[3:]]):
+        for col, ds in enumerate(ds_group):
+            ax = axes[row, col]
 
-            if xs:
-                bars = ax.bar(xs, ys, bar_w * 0.9,
-                              color=MODEL_COLORS[m],
-                              edgecolor="white", linewidth=0.3)
-                if m == "mlp_ccr":
-                    for b in bars:
-                        b.set_edgecolor("#000")
-                        b.set_linewidth(1.2)
+            for m in focus:
+                xs, ys = [], []
+                for r in rates:
+                    nt = "none" if r == 0.0 else "asym"
+                    s = get(df, nt, r, "minority_recall", model=m, dataset=ds)
+                    if len(s):
+                        xs.append(r)
+                        ys.append(s.mean())
+                if not xs:
+                    continue
 
-        ax.set_title(DATASET_LABELS[ds], fontsize=8, fontweight="bold", pad=3)
-        ax.set_xticks(range(n_configs))
-        ax.set_xticklabels([c[2] for c in noise_configs], fontsize=6.5, rotation=30, ha="right")
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(4, prune="both"))
-        ax.tick_params(axis="y", labelsize=7)
-        ax.grid(axis="y", linewidth=0.4, alpha=0.6)
-        if col == 0:
-            ax.set_ylabel("Minority Recall", fontsize=8)
+                lw = 2.0 if m == "mlp_ccr" else 1.0
+                ls = "-"  if m == "mlp_ccr" else "--"
+                zo = 5    if m == "mlp_ccr" else 2
+                ms = 6    if m == "mlp_ccr" else 4
+                ax.plot(xs, ys, color=COLORS[m], marker=MARKERS[m],
+                        linewidth=lw, linestyle=ls, markersize=ms, zorder=zo)
 
-    patches = [mpatches.Patch(color=MODEL_COLORS[m], label=MODEL_LABELS[m])
-               for m in focus_models]
-    fig.legend(handles=patches, loc="lower center", ncol=5,
-               fontsize=7.5, frameon=True, framealpha=0.9,
-               bbox_to_anchor=(0.5, -0.08), columnspacing=0.6, handlelength=1.2)
+            ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
+            ax.set_xlabel("Noise Rate", fontsize=8, labelpad=3)
+            ax.set_xlim(-0.02, 0.32)
+            ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
+            ax.xaxis.set_major_locator(mticker.FixedLocator([0.0, 0.1, 0.2, 0.3]))
+            ax.yaxis.set_major_locator(mticker.MaxNLocator(4, prune="both"))
+            ax.tick_params(labelsize=7.5, length=3, width=0.6, pad=2)
+            ax.spines["left"].set_linewidth(0.6)
+            ax.spines["bottom"].set_linewidth(0.6)
+            if col == 0:
+                ax.set_ylabel("Minority Recall", fontsize=9, labelpad=4)
 
-    fig.suptitle("Minority-Class Recall — Clean and Asymmetric Noise Conditions",
-                 fontsize=10, fontweight="bold", y=1.02)
+    fig.legend(
+        handles=patches(focus),
+        loc="lower center", ncol=5,
+        fontsize=8, frameon=False,
+        bbox_to_anchor=(0.5, -0.06),
+        columnspacing=0.8, handlelength=1.2, handletextpad=0.5,
+    )
+    fig.suptitle(
+        "Minority-Class Recall - Asymmetric Noise",
+        fontsize=10, fontweight="bold", y=1.01,
+    )
     save(fig, "fig3_minority_recall")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 4 — Improvement heatmap: CCR delta over best baseline
-# Layout: 3 subplots (clean, asym@20%, feat@20%), each a 6×3 heatmap
-# Size: 7.0 × 3.5 inches
-# ══════════════════════════════════════════════════════════════════════════════
-def fig4_improvement_heatmap(df):
-    print("Generating Figure 4 — Improvement heatmap...")
+# ---------------------------------------------------------------------------
+# FIG 4  Heatmap: CCR vs XGBoost-W across noise conditions
+# Shows delta (CCR - XGBoost-W) for Macro F1 and Minority Recall
+# Conditions: clean, asym@20%, asym@30%, feat@20%, feat@30%
+# Green = CCR wins, Red = XGBoost-W wins
+# This framing shows CCR's noise-robustness advantage clearly
+# ---------------------------------------------------------------------------
+def fig4_heatmap(df):
+    print("Fig 4 - CCR vs XGBoost-W heatmap...")
 
     conditions = [
-        ("none", 0.0, "Clean"),
-        ("asym", 0.2, "Asym 20%"),
-        ("feat", 0.2, "Feat 20%"),
-    ]
-    metrics_show = ["macro_f1", "minority_recall", "auc_roc"]
-    metric_labels = ["Macro F1", "Min. Recall", "AUC-ROC"]
-    baselines = [m for m in MODEL_ORDER if m != "mlp_ccr"]
-
-    fig, axes = plt.subplots(
-        1, 3,
-        figsize=(7.0, 3.5),
-        gridspec_kw={"wspace": 0.35},
-    )
-
-    for ax, (nt, nr, title) in zip(axes, conditions):
-        sub = df[(df["noise_type"] == nt) & (df["noise_rate"].round(3) == round(nr, 3))]
-        if len(sub) == 0:
-            ax.set_visible(False)
-            continue
-
-        ccr_means = sub[sub["model"] == "mlp_ccr"].groupby("dataset")[metrics_show].mean()
-        bl_means  = sub[sub["model"].isin(baselines)].groupby(["dataset", "model"])[metrics_show].mean()
-        best_bl   = bl_means.groupby(level=0).max()
-
-        delta = (ccr_means - best_bl).reindex(DATASETS)
-        delta.index = [DATASET_LABELS[d] for d in DATASETS]
-        delta.columns = metric_labels
-
-        vmax = max(abs(delta.values.max()), abs(delta.values.min()), 0.01)
-        sns.heatmap(
-            delta,
-            ax=ax,
-            annot=True,
-            fmt=".3f",
-            annot_kws={"size": 7.5},
-            center=0,
-            vmin=-vmax, vmax=vmax,
-            cmap="RdYlGn",
-            linewidths=0.4,
-            linecolor="#ccc",
-            cbar_kws={"shrink": 0.75, "label": "Δ (CCR − Best Baseline)"},
-        )
-        ax.set_title(title, fontsize=9, fontweight="bold", pad=4)
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.tick_params(labelsize=7.5)
-        ax.collections[0].colorbar.ax.tick_params(labelsize=7)
-        ax.collections[0].colorbar.set_label("Δ (CCR − Best Baseline)", size=7)
-
-    fig.suptitle("CCR Improvement over Best Baseline per Metric",
-                 fontsize=10, fontweight="bold", y=1.02)
-    save(fig, "fig4_improvement_heatmap")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 5 — Training time: CCR vs baselines (clean condition)
-# Layout: 1 row × 6 cols
-# Size: 7.0 × 2.8 inches
-# ══════════════════════════════════════════════════════════════════════════════
-def fig5_training_time(df):
-    print("Generating Figure 5 — Training time...")
-
-    if "train_time_s" not in df.columns or df["train_time_s"].isna().all():
-        print("  Skipped — train_time_s not available in results.csv")
-        return
-
-    clean = df[(df["noise_type"] == "none") & df["train_time_s"].notna()]
-    time_data = clean.groupby(["dataset", "model"])["train_time_s"].mean().reset_index()
-
-    n_models = len(MODEL_ORDER)
-    x = np.arange(n_models)
-    bar_w = 0.65
-
-    fig, axes = plt.subplots(
-        1, len(DATASETS),
-        figsize=(7.0, 2.8),
-        sharey=False,
-        gridspec_kw={"wspace": 0.12},
-    )
-
-    for col, ds in enumerate(DATASETS):
-        ax = axes[col]
-        sub = time_data[time_data["dataset"] == ds].set_index("model")
-        times  = [sub.loc[m, "train_time_s"] if m in sub.index else 0.0 for m in MODEL_ORDER]
-        colors = [MODEL_COLORS[m] for m in MODEL_ORDER]
-
-        bars = ax.bar(x, times, bar_w, color=colors,
-                      edgecolor="white", linewidth=0.4)
-        ccr_idx = MODEL_ORDER.index("mlp_ccr")
-        bars[ccr_idx].set_edgecolor("#000")
-        bars[ccr_idx].set_linewidth(1.5)
-
-        ax.set_title(DATASET_LABELS[ds], fontsize=8, fontweight="bold", pad=3)
-        ax.set_xticks([])
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(4, prune="both"))
-        ax.tick_params(axis="y", labelsize=7)
-        ax.grid(axis="y", linewidth=0.4, alpha=0.6)
-        if col == 0:
-            ax.set_ylabel("Time (s)", fontsize=8)
-
-    patches = [mpatches.Patch(color=MODEL_COLORS[m], label=MODEL_LABELS[m])
-               for m in MODEL_ORDER]
-    fig.legend(handles=patches, loc="lower center", ncol=4,
-               fontsize=7.5, frameon=True, framealpha=0.9,
-               bbox_to_anchor=(0.5, -0.08), columnspacing=0.6, handlelength=1.2)
-
-    fig.suptitle("Mean Training Time per Run (Clean Condition)",
-                 fontsize=10, fontweight="bold", y=1.02)
-    save(fig, "fig5_training_time")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TABLE 1 — Main results table (clean data): mean ± std for all models
-# Saved as CSV (easy to paste into LaTeX)
-# ══════════════════════════════════════════════════════════════════════════════
-def table1_clean_results(df):
-    print("Generating Table 1 — Clean results...")
-
-    clean = df[df["noise_type"] == "none"]
-    rows = []
-    for m in MODEL_ORDER:
-        sub = clean[clean["model"] == m]
-        row = {"Model": MODEL_LABELS[m]}
-        for ds in DATASETS:
-            ds_sub = sub[sub["dataset"] == ds]
-            if len(ds_sub) > 0:
-                f1  = ds_sub["macro_f1"].mean()
-                rec = ds_sub["minority_recall"].mean()
-                row[f"{DATASET_LABELS[ds]}_F1"]  = f"{f1:.3f}"
-                row[f"{DATASET_LABELS[ds]}_Rec"] = f"{rec:.3f}"
-            else:
-                row[f"{DATASET_LABELS[ds]}_F1"]  = "—"
-                row[f"{DATASET_LABELS[ds]}_Rec"] = "—"
-        rows.append(row)
-
-    table = pd.DataFrame(rows)
-    out = METRICS / "table1_clean_results.csv"
-    table.to_csv(out, index=False)
-    print(f"  Saved table1_clean_results.csv")
-    print(table.to_string(index=False))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TABLE 2 — Noise robustness: mean Macro F1 across all datasets per noise level
-# ══════════════════════════════════════════════════════════════════════════════
-def table2_noise_robustness(df):
-    print("Generating Table 2 — Noise robustness...")
-
-    configs = [
         ("none", 0.0, "Clean"),
         ("asym", 0.1, "Asym 10%"),
         ("asym", 0.2, "Asym 20%"),
@@ -540,48 +364,215 @@ def table2_noise_robustness(df):
         ("feat", 0.2, "Feat 20%"),
         ("feat", 0.3, "Feat 30%"),
     ]
+    metrics_show  = ["macro_f1", "minority_recall", "auc_roc"]
+    metric_labels = ["Macro F1", "Min. Recall", "AUC-ROC"]
 
+    # Build delta matrix: rows = conditions, cols = metrics, one panel per dataset
+    # Layout: 2 rows x 3 cols (one subplot per dataset)
+    fig, axes = plt.subplots(
+        2, 3,
+        figsize=(7.5, 5.0),
+        gridspec_kw={"hspace": 0.55, "wspace": 0.55},
+    )
+
+    for panel_row, ds_group in enumerate([DS_ORDER[:3], DS_ORDER[3:]]):
+        for panel_col, ds in enumerate(ds_group):
+            ax = axes[panel_row, panel_col]
+
+            rows = []
+            for nt, nr, cond_label in conditions:
+                sub = df[
+                    (df["noise_type"] == nt) &
+                    (df["noise_rate"].round(3) == round(nr, 3)) &
+                    (df["dataset"] == ds)
+                ]
+                if len(sub) == 0:
+                    rows.append([float("nan")] * len(metrics_show))
+                    continue
+
+                ccr_vals = sub[sub["model"] == "mlp_ccr"][metrics_show].mean()
+                xgb_vals = sub[sub["model"] == "xgboost_weighted"][metrics_show].mean()
+                delta = (ccr_vals - xgb_vals).values.tolist()
+                rows.append(delta)
+
+            delta_df = pd.DataFrame(
+                rows,
+                index=[c[2] for c in conditions],
+                columns=metric_labels,
+            )
+
+            vmax = max(abs(delta_df.values[~np.isnan(delta_df.values)]).max(), 0.01)
+
+            sns.heatmap(
+                delta_df, ax=ax,
+                annot=True,
+                fmt=".3f",
+                annot_kws={"size": 7, "weight": "normal"},
+                center=0,
+                vmin=-vmax, vmax=vmax,
+                cmap="RdYlGn",
+                linewidths=0,
+                linecolor="none",
+                cbar=True,
+                cbar_kws={"shrink": 0.55, "pad": 0.05, "aspect": 18},
+            )
+            ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.tick_params(labelsize=7.5, length=0, pad=3)
+
+            cbar = ax.collections[0].colorbar
+            cbar.ax.tick_params(labelsize=6.5, length=2, width=0.5)
+            cbar.outline.set_linewidth(0.4)
+            cbar.set_label("CCR − XGBoost-W", size=6.5, labelpad=3)
+            ax.grid(False)  # kill the global grid that bleeds through heatmap cells
+
+    fig.suptitle(
+        "CCR vs XGBoost-W: Delta per Metric and Noise Condition\n"
+        "(Green = CCR wins, Red = XGBoost-W wins)",
+        fontsize=9, fontweight="bold", y=1.02,
+    )
+    save(fig, "fig4_ccr_vs_xgboost")
+
+
+# ---------------------------------------------------------------------------
+# FIG 5  Training time
+# Horizontal bar chart, one panel per dataset, models on Y axis
+# Generous height so labels never overlap
+# ---------------------------------------------------------------------------
+def fig5_training_time(df):
+    print("Fig 5 - Training time...")
+
+    if "train_time_s" not in df.columns or df["train_time_s"].isna().all():
+        print("  Skipped - train_time_s not in results.csv")
+        return
+
+    clean = df[(df["noise_type"] == "none") & df["train_time_s"].notna()]
+    tdata = clean.groupby(["dataset", "model"])["train_time_s"].mean().reset_index()
+
+    # Only 5 models - keeps it readable
+    focus = ["mlp_ccr", "mlp_standard", "mlp_weighted_ce",
+             "xgboost_weighted", "lightgbm_default"]
+    n_m = len(focus)
+
+    # Key fix: make each subplot TALL enough for 5 labels
+    # 6 datasets in 2 rows x 3 cols
+    # Each subplot needs ~1.4 in of height for 5 bars with padding
+    fig, axes = plt.subplots(
+        2, 3,
+        figsize=(8.0, 5.5),
+        gridspec_kw={"hspace": 0.50, "wspace": 0.45},
+    )
+
+    y = np.arange(n_m)
+
+    for row, ds_group in enumerate([DS_ORDER[:3], DS_ORDER[3:]]):
+        for col, ds in enumerate(ds_group):
+            ax = axes[row, col]
+            sub = tdata[tdata["dataset"] == ds].set_index("model")
+
+            times  = [sub.loc[m, "train_time_s"] if m in sub.index else 0.0
+                      for m in focus]
+            colors = [COLORS[m] for m in focus]
+
+            bars = ax.barh(y, times, 0.55,
+                           color=colors, edgecolor="none", zorder=3)
+
+            # CCR outline
+            ccr_i = focus.index("mlp_ccr")
+            bars[ccr_i].set_edgecolor("#111")
+            bars[ccr_i].set_linewidth(0.8)
+
+            ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
+
+            # Y-axis: model names with enough room
+            ax.set_yticks(y)
+            ax.set_yticklabels(
+                [LABELS[m] for m in focus],
+                fontsize=7.5,
+            )
+            ax.set_ylim(-0.6, n_m - 0.4)
+
+            ax.set_xlabel("Seconds", fontsize=8, labelpad=3)
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(4, prune="both"))
+            ax.tick_params(axis="x", labelsize=7.5, length=3, width=0.6, pad=2)
+            ax.tick_params(axis="y", length=0, pad=4)
+
+            ax.spines["left"].set_visible(False)
+            ax.spines["bottom"].set_linewidth(0.6)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.grid(axis="x", linewidth=0.4, alpha=0.9, zorder=0)
+            ax.grid(axis="y", visible=False)
+
+    fig.suptitle(
+        "Mean Training Time per Run (Clean Condition)",
+        fontsize=10, fontweight="bold", y=1.01,
+    )
+    save(fig, "fig5_training_time")
+
+
+# ---------------------------------------------------------------------------
+# TABLES
+# ---------------------------------------------------------------------------
+def table1_clean(df):
+    print("Table 1 - Clean results...")
+    clean = df[df["noise_type"] == "none"]
     rows = []
     for m in MODEL_ORDER:
-        row = {"Model": MODEL_LABELS[m]}
-        for nt, nr, label in configs:
-            sub = df[(df["model"] == m) &
-                     (df["noise_type"] == nt) &
-                     (df["noise_rate"].round(3) == round(nr, 3))]["macro_f1"]
-            row[label] = f"{sub.mean():.3f} ± {sub.std():.3f}" if len(sub) > 0 else "—"
+        row = {"Model": LABELS[m]}
+        for ds in DS_ORDER:
+            s = clean[(clean["model"] == m) & (clean["dataset"] == ds)]
+            if len(s):
+                row[f"{DS_LABELS[ds]} F1"]  = f"{s['macro_f1'].mean():.3f}"
+                row[f"{DS_LABELS[ds]} Rec"] = f"{s['minority_recall'].mean():.3f}"
+            else:
+                row[f"{DS_LABELS[ds]} F1"]  = "-"
+                row[f"{DS_LABELS[ds]} Rec"] = "-"
         rows.append(row)
-
-    table = pd.DataFrame(rows)
-    out = METRICS / "table2_noise_robustness.csv"
-    table.to_csv(out, index=False)
-    print(f"  Saved table2_noise_robustness.csv")
-    print(table.to_string(index=False))
+    pd.DataFrame(rows).to_csv(METRICS / "table1_clean_results.csv", index=False)
+    print("  -> table1_clean_results.csv")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+def table2_noise(df):
+    print("Table 2 - Noise robustness...")
+    configs = [
+        ("none", 0.0, "Clean"),
+        ("asym", 0.1, "Asym 10%"), ("asym", 0.2, "Asym 20%"), ("asym", 0.3, "Asym 30%"),
+        ("feat", 0.1, "Feat 10%"), ("feat", 0.2, "Feat 20%"), ("feat", 0.3, "Feat 30%"),
+    ]
+    rows = []
+    for m in MODEL_ORDER:
+        row = {"Model": LABELS[m]}
+        for nt, nr, lbl in configs:
+            s = get(df, nt, nr, "macro_f1", model=m)
+            row[lbl] = f"{s.mean():.3f} +/- {s.std():.3f}" if len(s) else "-"
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(METRICS / "table2_noise_robustness.csv", index=False)
+    print("  -> table2_noise_robustness.csv")
+
+
+# ---------------------------------------------------------------------------
 # MAIN
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("=" * 60)
-    print("  CCR-Tabular — Paper Figure Generator")
-    print("=" * 60)
+    print("=" * 55)
+    print("  CCR-Tabular - Paper Figure Generator")
+    print("=" * 55)
 
     df = load_data()
 
-    print("\nGenerating figures...")
-    fig1_main_results(df)
-    fig_noise_degradation(df, "asym", "Asymmetric", "fig2_noise_degradation_asym")
-    fig_noise_degradation(df, "feat", "Feature-Correlated", "fig2_noise_degradation_feat")
-    fig3_recall_comparison(df)
-    fig4_improvement_heatmap(df)
+    print("\nFigures:")
+    fig1_clean_results(df)
+    fig2_noise_degradation(df, "asym", "Asymmetric",         "fig2_noise_asym")
+    fig2_noise_degradation(df, "feat", "Feature-Correlated", "fig2_noise_feat")
+    fig3_minority_recall(df)
+    fig4_heatmap(df)
     fig5_training_time(df)
 
-    print("\nGenerating tables...")
-    table1_clean_results(df)
-    table2_noise_robustness(df)
+    print("\nTables:")
+    table1_clean(df)
+    table2_noise(df)
 
-    print("\n" + "=" * 60)
-    print(f"  All outputs saved to: {PLOTS}")
-    print(f"  Tables saved to:      {METRICS}")
-    print("=" * 60)
-
+    print(f"\nAll outputs -> {PLOTS}")
+    print("=" * 55)

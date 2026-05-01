@@ -411,14 +411,13 @@ if __name__ == "__main__":
         run_all_experiments(datasets=None, models=None)
 
         # ── Phase 4: Expansion experiments ───────────────────────────────────
-        if not args.no_prefetch:  # only run expansions in full mode
-            print("=" * 60, flush=True)
-            print("PHASE 4 — Expansion experiments", flush=True)
-            print("  (ablation, tau/K/beta sensitivity, noise@40%, learning curves)", flush=True)
-            print("=" * 60, flush=True)
-            try:
-                from experiments.expansions.run_all_expansions import main as run_expansions
-                run_expansions()
-            except Exception as exc:
-                print(f"  WARNING: Expansion experiments failed: {exc}", flush=True)
-                print("  Run manually: python experiments/expansions/run_all_expansions.py", flush=True)
+        print("=" * 60, flush=True)
+        print("PHASE 4 — Expansion experiments", flush=True)
+        print("  (ablation, tau/K/beta sensitivity, noise@40%, learning curves)", flush=True)
+        print("=" * 60, flush=True)
+        try:
+            from experiments.expansions.run_all_expansions import main as run_expansions
+            run_expansions()
+        except Exception as exc:
+            print(f"  WARNING: Expansion experiments failed: {exc}", flush=True)
+            print("  Run manually: python experiments/expansions/run_all_expansions.py", flush=True)

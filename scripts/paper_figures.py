@@ -339,8 +339,10 @@ def fig3_minority_recall(df):
         columnspacing=0.8, handlelength=1.2, handletextpad=0.5,
     )
     fig.suptitle(
-        "Minority-Class Recall - Asymmetric Noise",
-        fontsize=10, fontweight="bold", y=1.01,
+        "Minority-Class Recall — Asymmetric Noise\n"
+        "Note: CCR achieves intermediate recall, above vanilla MLP methods but below\n"
+        "MLP-WCE and MLP-SMOTE which employ aggressive minority upweighting at the cost of precision.",
+        fontsize=8, fontweight="bold", y=1.01,
     )
     save(fig, "fig3_minority_recall")
 
@@ -360,6 +362,7 @@ def fig4_heatmap(df):
         ("asym", 0.1, "Asym 10%"),
         ("asym", 0.2, "Asym 20%"),
         ("asym", 0.3, "Asym 30%"),
+        ("asym", 0.4, "Asym 40%"),
         ("feat", 0.1, "Feat 10%"),
         ("feat", 0.2, "Feat 20%"),
         ("feat", 0.3, "Feat 30%"),
@@ -371,7 +374,7 @@ def fig4_heatmap(df):
     # Layout: 2 rows x 3 cols (one subplot per dataset)
     fig, axes = plt.subplots(
         2, 3,
-        figsize=(7.5, 5.0),
+        figsize=(7.5, 6.0),
         gridspec_kw={"hspace": 0.55, "wspace": 0.55},
     )
 
@@ -666,8 +669,11 @@ def fig6_ablation(df_abl):
                bbox_to_anchor=(0.5, -0.06),
                columnspacing=0.8, handlelength=1.2, handletextpad=0.5)
 
-    fig.suptitle("Ablation Study: CCR Component Contributions",
-                 fontsize=10, fontweight="bold", y=1.01)
+    fig.suptitle(
+        "CCR Ablation: Effect of Key Components\n"
+        "Class-frequency weighting maintained across all variants (standard baseline component).",
+        fontsize=9, fontweight="bold", y=1.01,
+    )
     save(fig, "fig6_ablation")
 
 

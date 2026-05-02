@@ -910,6 +910,30 @@ def fig10_learning_curves(df_curves):
         return
     print("Fig 10 - Learning curves...")
 
+    # Models to show — CCR + 2 key baselines
+    curve_models = [m for m in ["mlp_ccr", "mlp_standard", "mlp_weighted_ce"]
+                    if m in df_curves["model"].unique()]
+    curve_labels = {
+        "mlp_ccr":         "CCR (Ours)",
+        "mlp_standard":    "MLP-CE",
+        "mlp_weighted_ce": "MLP-WCE",
+    }
+    curve_colors = {
+        "mlp_ccr":         COLORS["mlp_ccr"],
+        "mlp_standard":    COLORS["mlp_standard"],
+        "mlp_weighted_ce": COLORS["mlp_weighted_ce"],
+    }
+    curve_lw = {
+        "mlp_ccr":         2.0,
+        "mlp_standard":    1.0,
+        "mlp_weighted_ce": 1.0,
+    }
+    curve_ls = {
+        "mlp_ccr":         "-",
+        "mlp_standard":    "--",
+        "mlp_weighted_ce": "-.",
+    }
+
     fig, axes = plt.subplots(
         2, 3,
         figsize=(7.5, 5.0),
@@ -919,21 +943,34 @@ def fig10_learning_curves(df_curves):
     for row, ds_group in enumerate([DS_ORDER[:3], DS_ORDER[3:]]):
         for col, ds in enumerate(ds_group):
             ax = axes[row, col]
-            sub = df_curves[df_curves["dataset"] == ds]
-            if len(sub) == 0:
+            has_data = False
+
+            for model_name in curve_models:
+                sub = df_curves[
+                    (df_curves["dataset"] == ds) &
+                    (df_curves["model"] == model_name)
+                ].sort_values("epoch")
+
+                if len(sub) == 0:
+                    continue
+
+                has_data = True
+                epochs = sub["epoch"].values
+                means  = sub["mean_val_f1"].values
+                stds   = sub["std_val_f1"].values
+
+                ax.plot(epochs, means,
+                        color=curve_colors[model_name],
+                        linewidth=curve_lw[model_name],
+                        linestyle=curve_ls[model_name],
+                        label=curve_labels[model_name],
+                        zorder=5 if model_name == "mlp_ccr" else 2)
+                ax.fill_between(epochs, means - stds, means + stds,
+                                alpha=0.08, color=curve_colors[model_name], zorder=1)
+
+            if not has_data:
                 ax.text(0.5, 0.5, "No data", ha="center", va="center",
                         transform=ax.transAxes, fontsize=9, color="#888")
-                ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
-                continue
-
-            epochs = sub["epoch"].values
-            means  = sub["mean_val_f1"].values
-            stds   = sub["std_val_f1"].values
-
-            ax.plot(epochs, means, color=COLORS["mlp_ccr"],
-                    linewidth=1.8, label="CCR (Ours)")
-            ax.fill_between(epochs, means - stds, means + stds,
-                            alpha=0.12, color=COLORS["mlp_ccr"])
 
             ax.set_title(DS_LABELS[ds], fontsize=9, fontweight="bold", pad=4)
             ax.set_xlabel("Epoch", fontsize=8, labelpad=3)
@@ -944,8 +981,18 @@ def fig10_learning_curves(df_curves):
             if col == 0:
                 ax.set_ylabel("Val Macro F1", fontsize=9, labelpad=4)
 
-    fig.suptitle("CCR Training Dynamics — Asymmetric Noise 30%\n(Mean ± Std across 5 folds × 3 seeds)",
-                 fontsize=9, fontweight="bold", y=1.02)
+    # Shared legend
+    handles = [mpatches.Patch(color=curve_colors[m], label=curve_labels[m])
+               for m in curve_models if m in curve_colors]
+    fig.legend(handles=handles, loc="lower center", ncol=3,
+               fontsize=8, frameon=False,
+               bbox_to_anchor=(0.5, -0.06),
+               columnspacing=0.8, handlelength=1.2, handletextpad=0.5)
+
+    fig.suptitle(
+        "Training Dynamics — Asymmetric Noise 30%\n(Mean ± Std, 5-fold × 3-seed CV)",
+        fontsize=9, fontweight="bold", y=1.02,
+    )
     save(fig, "fig10_learning_curves")
 
 

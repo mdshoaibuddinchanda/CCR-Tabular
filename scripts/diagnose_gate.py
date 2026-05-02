@@ -1,23 +1,21 @@
 ﻿"""
-diagnose_gate.py â€” CCR Confidence Gate Diagnostic
-===================================================
-Measures the fraction of samples per batch where p_i > tau fires.
-If consistently > 90%, the gate is always on and contributes nothing.
-If consistently < 50%, the gate is suppressing most samples.
+diagnose_gate.py - CCR Confidence Gate Diagnostic (Recheck)
+============================================================
+Tests gate activation at tau=0.7 on Bank and Adult.
+Target: 45-65% gate activation (intended operating range).
 
-Runs on adult (large, real noise) and credit_g (small, controlled).
-Tests both clean and asym@20% noise conditions.
+Auto-escalates to tau=0.75 if still above 85% at tau=0.7.
 
 Usage:
-    python diagnose_gate.py
+    python scripts/diagnose_gate.py
 
 Output:
-    outputs/logs/gate_diagnostic.csv
-    Printed summary to stdout
+    outputs/logs/gate_diagnostic_recheck.csv
+    Printed verdict to stdout
 """
 
-import sys
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -35,31 +33,36 @@ from src.data.preprocess import preprocess_split
 from src.loss.ccr_loss import CCRLoss
 from src.models.mlp import TabularDataset, get_mlp_for_dataset
 from src.utils.config import (
-    BATCH_SIZE, EARLY_STOP_PATIENCE, LEARNING_RATE,
-    MAX_EPOCHS, OUTPUTS_LOGS, SEEDS, TAU, VAL_SIZE, WEIGHT_DECAY,
+    BATCH_SIZE, LEARNING_RATE, OUTPUTS_LOGS, VAL_SIZE, WEIGHT_DECAY,
 )
 from src.utils.logger import setup_logging
 from src.utils.reproducibility import fix_all_seeds, get_device
 
-setup_logging(level=logging.WARNING)  # suppress INFO noise
+setup_logging(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-OUTPUT_CSV = OUTPUTS_LOGS / "gate_diagnostic.csv"
+OUTPUT_CSV = OUTPUTS_LOGS / "gate_diagnostic_recheck.csv"
 
-DIAG_DATASETS = ["adult", "bank", "credit_g", "phoneme"]
-DIAG_CONDITIONS = [
+# Recheck config — Bank and Adult only, as specified
+RECHECK_DATASETS = ["adult", "bank"]
+RECHECK_CONDITIONS = [
     ("none", 0.0),
     ("asym", 0.2),
     ("asym", 0.3),
 ]
-DIAG_SEED = 42
-DIAG_FOLD = 1
-DIAG_EPOCHS = 30  # enough to see convergence pattern
+RECHECK_SEED = 42
+RECHECK_FOLD = 1
+RECHECK_EPOCHS = 30
+
+# Target gate activation range
+TARGET_LOW  = 0.45
+TARGET_HIGH = 0.65
+ESCALATE_THRESHOLD = 0.85  # if still above this at tau=0.7, try tau=0.75
 
 
-def run_diagnostic(dataset_name, noise_type, noise_rate):
-    """Train CCR for DIAG_EPOCHS and log gate activation rate per epoch."""
-    fix_all_seeds(DIAG_SEED)
+def run_diagnostic_at_tau(dataset_name, noise_type, noise_rate, tau):
+    """Train CCR for RECHECK_EPOCHS at given tau, return per-epoch gate stats."""
+    fix_all_seeds(RECHECK_SEED)
     device = get_device()
 
     df_data = load_dataset(dataset_name)
@@ -67,9 +70,9 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
     X = df_data[feature_cols]
     y = df_data["target"].values
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=DIAG_SEED)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RECHECK_SEED)
     for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
-        if fold_idx + 1 == DIAG_FOLD:
+        if fold_idx + 1 == RECHECK_FOLD:
             break
 
     X_tr_df = X.iloc[train_idx].reset_index(drop=True)
@@ -79,7 +82,7 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
 
     X_tr_df2, X_val_df, y_tr2, y_val = train_test_split(
         X_tr_df, y_tr_raw,
-        test_size=VAL_SIZE, stratify=y_tr_raw, random_state=DIAG_SEED,
+        test_size=VAL_SIZE, stratify=y_tr_raw, random_state=RECHECK_SEED,
     )
 
     (X_tr_np, X_val_np, X_te_np,
@@ -88,9 +91,8 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
         pd.Series(y_tr2), pd.Series(y_val), pd.Series(y_te_raw),
     )
 
-    # Inject noise if needed
     if noise_type == "asym" and noise_rate > 0:
-        y_tr_np, _ = inject_asymmetric_noise(y_tr_np, noise_rate, DIAG_SEED)
+        y_tr_np, _ = inject_asymmetric_noise(y_tr_np, noise_rate, RECHECK_SEED)
 
     n_majority = int(np.sum(y_tr_np == 0))
     n_minority = int(np.sum(y_tr_np == 1))
@@ -100,12 +102,12 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
         n_samples=len(y_tr_np),
         n_classes=2,
         class_counts=[n_majority, n_minority],
+        tau=tau,
         device=device,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
-
     loader = DataLoader(
         TabularDataset(X_tr_np, y_tr_np),
         batch_size=BATCH_SIZE, shuffle=True, drop_last=False,
@@ -113,29 +115,20 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
 
     epoch_records = []
 
-    for epoch in range(DIAG_EPOCHS):
+    for epoch in range(RECHECK_EPOCHS):
         model.train()
-        gate_fracs = []
-        p_i_means  = []
-        p_i_below_tau = []
+        gate_fracs, p_i_means = [], []
 
         for X_b, y_b, idx_b in loader:
             X_b, y_b, idx_b = X_b.to(device), y_b.to(device), idx_b.to(device)
             optimizer.zero_grad()
             logits = model(X_b)
 
-            # â”€â”€ Compute p_i (prob of true class) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             probs = F.softmax(logits, dim=1)
             p_i = probs[torch.arange(len(y_b), device=device), y_b]
-
-            # â”€â”€ Gate activation fraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            gate_fired = (p_i > TAU).float()
-            gate_frac  = gate_fired.mean().item()
-            gate_fracs.append(gate_frac)
+            gate_fracs.append((p_i > tau).float().mean().item())
             p_i_means.append(p_i.mean().item())
-            p_i_below_tau.append((p_i <= TAU).float().mean().item())
 
-            # Normal training step
             loss = criterion(logits, y_b, idx_b, epoch)
             if not torch.isnan(loss):
                 loss.backward()
@@ -147,95 +140,103 @@ def run_diagnostic(dataset_name, noise_type, noise_rate):
             "dataset":        dataset_name,
             "noise_type":     noise_type,
             "noise_rate":     noise_rate,
+            "tau":            tau,
             "epoch":          epoch + 1,
-            "gate_frac_mean": round(np.mean(gate_fracs), 4),
-            "gate_frac_min":  round(np.min(gate_fracs), 4),
-            "gate_frac_max":  round(np.max(gate_fracs), 4),
-            "p_i_mean":       round(np.mean(p_i_means), 4),
-            "frac_below_tau": round(np.mean(p_i_below_tau), 4),
-            "tau":            TAU,
+            "gate_frac_mean": round(float(np.mean(gate_fracs)), 4),
+            "p_i_mean":       round(float(np.mean(p_i_means)), 4),
+            "frac_below_tau": round(float(1 - np.mean(gate_fracs)), 4),
         })
 
     return epoch_records
 
 
 def main():
-    print("=" * 65)
-    print("  CCR Confidence Gate Diagnostic")
-    print(f"  tau = {TAU}  (gate fires when p_i > tau)")
-    print(f"  Datasets: {DIAG_DATASETS}")
-    print("=" * 65)
+    print("=" * 65, flush=True)
+    print("  CCR Gate Diagnostic Recheck", flush=True)
+    print(f"  Testing tau=0.7 on: {RECHECK_DATASETS}", flush=True)
+    print(f"  Target gate activation: {TARGET_LOW:.0%} – {TARGET_HIGH:.0%}", flush=True)
+    print("=" * 65, flush=True)
 
     all_records = []
+    taus_to_test = [0.7]
 
-    for dataset_name in DIAG_DATASETS:
-        for noise_type, noise_rate in DIAG_CONDITIONS:
-            label = f"{noise_type}@{noise_rate:.0%}" if noise_type != "none" else "clean"
-            print(f"\n  Running: {dataset_name} | {label} ...", flush=True)
+    for tau in taus_to_test:
+        print(f"\n  === Testing tau={tau} ===", flush=True)
+        tau_records = []
 
-            try:
-                records = run_diagnostic(dataset_name, noise_type, noise_rate)
-                all_records.extend(records)
+        for dataset_name in RECHECK_DATASETS:
+            for noise_type, noise_rate in RECHECK_CONDITIONS:
+                label = f"{noise_type}@{noise_rate:.0%}" if noise_type != "none" else "clean"
+                print(f"\n  {dataset_name} | {label} | tau={tau}", flush=True)
 
-                # Print epoch 1, 10, 20, 30 summary
-                for r in records:
-                    if r["epoch"] in (1, 5, 10, 20, 30):
-                        print(
-                            f"    Epoch {r['epoch']:>2}: "
-                            f"gate_fired={r['gate_frac_mean']:.1%}  "
-                            f"p_i_mean={r['p_i_mean']:.3f}  "
-                            f"below_tau={r['frac_below_tau']:.1%}"
-                        )
-            except Exception as exc:
-                print(f"  FAILED: {exc}")
+                try:
+                    records = run_diagnostic_at_tau(dataset_name, noise_type, noise_rate, tau)
+                    tau_records.extend(records)
+                    all_records.extend(records)
 
-    # Save
+                    # Print key epochs
+                    for r in records:
+                        if r["epoch"] in (1, 5, 10, 20, 30):
+                            print(
+                                f"    Epoch {r['epoch']:>2}: "
+                                f"gate={r['gate_frac_mean']:.1%}  "
+                                f"p_i_mean={r['p_i_mean']:.3f}  "
+                                f"below_tau={r['frac_below_tau']:.1%}",
+                                flush=True,
+                            )
+                except Exception as exc:
+                    print(f"  FAILED: {exc}", flush=True)
+                    logger.error(f"Diagnostic failed: {exc}", exc_info=True)
+
+        # Check if tau=0.7 is in target range
+        if tau_records:
+            late = [r for r in tau_records if r["epoch"] >= 20]
+            overall = float(np.mean([r["gate_frac_mean"] for r in late]))
+            print(f"\n  tau={tau} overall gate activation (epochs 20-30): {overall:.1%}", flush=True)
+
+            if overall > ESCALATE_THRESHOLD:
+                print(f"  STILL ABOVE {ESCALATE_THRESHOLD:.0%} — escalating to tau=0.75", flush=True)
+                taus_to_test.append(0.75)
+            elif TARGET_LOW <= overall <= TARGET_HIGH:
+                print(f"  IN TARGET RANGE ({TARGET_LOW:.0%}–{TARGET_HIGH:.0%}) — tau={tau} is CONFIRMED", flush=True)
+            elif overall < TARGET_LOW:
+                print(f"  BELOW TARGET — gate too selective at tau={tau}. Consider tau=0.65.", flush=True)
+            else:
+                print(f"  ABOVE TARGET but below escalation threshold — tau={tau} is acceptable.", flush=True)
+
+    # Save all records
     df_out = pd.DataFrame(all_records)
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(OUTPUT_CSV, index=False)
-    print(f"\n  Full results saved to {OUTPUT_CSV}")
+    print(f"\n  Results saved to {OUTPUT_CSV}", flush=True)
 
-    # â”€â”€ Summary verdict â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Final verdict
     print()
-    print("=" * 65)
-    print("  GATE DIAGNOSTIC VERDICT")
-    print("=" * 65)
+    print("=" * 65, flush=True)
+    print("  FINAL VERDICT", flush=True)
+    print("=" * 65, flush=True)
 
-    # Average gate activation in final 10 epochs per condition
-    late_epochs = df_out[df_out["epoch"] >= 20]
-    summary = late_epochs.groupby(["dataset", "noise_type", "noise_rate"])[
-        ["gate_frac_mean", "p_i_mean", "frac_below_tau"]
-    ].mean().round(4)
+    for tau in df_out["tau"].unique():
+        sub = df_out[(df_out["tau"] == tau) & (df_out["epoch"] >= 20)]
+        overall = sub["gate_frac_mean"].mean()
+        in_range = TARGET_LOW <= overall <= TARGET_HIGH
+        status = "CONFIRMED" if in_range else ("TOO HIGH" if overall > TARGET_HIGH else "TOO LOW")
+        print(f"  tau={tau}: gate={overall:.1%}  [{status}]", flush=True)
 
-    print(summary.to_string())
     print()
-
-    overall_gate = late_epochs["gate_frac_mean"].mean()
-    print(f"  Overall gate activation (epochs 20-30): {overall_gate:.1%}")
-
-    if overall_gate > 0.90:
-        print()
-        print("  FINDING: Gate fires on >90% of samples consistently.")
-        print("  The indicator I(p_i > tau) is almost always 1.")
-        print("  tau=0.3 is too low â€” most samples exceed it after a few epochs.")
-        print("  The gate is effectively disabled. Variance term applies to all samples.")
-        print()
-        print("  RECOMMENDATION:")
-        print("  1. Report this honestly in the paper as a calibration finding.")
-        print("  2. Suggest tau should be tuned per dataset or set higher (e.g. 0.6-0.7).")
-        print("  3. The variance term still contributes â€” just without selective gating.")
-    elif overall_gate < 0.50:
-        print()
-        print("  FINDING: Gate fires on <50% of samples.")
-        print("  The gate is actively suppressing noisy/uncertain samples.")
-        print("  This is the intended behavior â€” mechanism is working correctly.")
-    else:
-        print()
-        print("  FINDING: Gate fires on 50-90% of samples.")
-        print("  Moderate selectivity. Gate is partially active.")
-        print("  Check per-dataset breakdown above for variation.")
-
-    print("=" * 65)
+    print("  Recommended tau for paper:", flush=True)
+    best_tau = None
+    best_dist = float("inf")
+    target_mid = (TARGET_LOW + TARGET_HIGH) / 2
+    for tau in df_out["tau"].unique():
+        sub = df_out[(df_out["tau"] == tau) & (df_out["epoch"] >= 20)]
+        overall = sub["gate_frac_mean"].mean()
+        dist = abs(overall - target_mid)
+        if dist < best_dist:
+            best_dist = dist
+            best_tau = tau
+    print(f"  tau={best_tau} (closest to {target_mid:.0%} midpoint)", flush=True)
+    print("=" * 65, flush=True)
 
 
 if __name__ == "__main__":

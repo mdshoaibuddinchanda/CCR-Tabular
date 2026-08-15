@@ -238,7 +238,7 @@ class CCRLoss(nn.Module):
                 true_probs = probs.detach()[torch.arange(len(targets), device=probs.device), targets]
             else:
                 true_probs = probs.detach().max(dim=1).values
-            self.history[sample_indices, col] = true_probs
+            self.history[sample_indices, col] = true_probs.to(dtype=self.history.dtype, device=self.history.device)
 
     def _compute_variance(
         self,

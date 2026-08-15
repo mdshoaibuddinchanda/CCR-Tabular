@@ -174,7 +174,7 @@ class EarlyLearningRegularizationLoss(nn.Module):
             hist_preds = self.target_history[sample_indices].to(logits.device)
             # Update temporal buffer
             new_hist = self.beta_momentum * hist_preds + (1.0 - self.beta_momentum) * probs.detach()
-            self.target_history[sample_indices] = new_hist.to(self.target_history.device)
+            self.target_history[sample_indices] = new_hist.to(dtype=self.target_history.dtype, device=self.target_history.device)
 
         # Regularization term: log(1 - <p, e>)
         reg = torch.sum(probs * hist_preds, dim=1)

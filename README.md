@@ -8,7 +8,7 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20(CUDA%20%7C%20CPU)-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.3+-F7931E?style=for-the-badge&logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-80%20passed-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-85%20passed-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![Audit Gate](https://img.shields.io/badge/Dataset%20Audit-14%2F14%20PASSED-success?style=for-the-badge)](outputs/metrics/dataset_audit_report.csv)
 
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0+-189fdd?style=flat-square)](https://xgboost.readthedocs.io/)

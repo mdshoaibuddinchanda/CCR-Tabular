@@ -33,9 +33,11 @@ from src.utils.config import (
     CORE_10_DATASETS,
     LOSS_NAMES,
     N_FOLDS,
+    OUTPUTS_FINAL_MASTER,
     OUTPUTS_METRICS,
     SEEDS,
 )
+from src.utils.manifest import generate_experiment_manifest
 from src.utils.statistics import analyze_dataset_level_significance
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -50,8 +52,9 @@ def run_tier1_benchmark(
     n_folds: int = N_FOLDS,
     fast_mode: bool = True,
     device_override: str = "auto",
+    results_path: Optional[Path] = None,
 ) -> pd.DataFrame:
-    """Run core 10-dataset master benchmark using heterogeneous scheduling."""
+    """Run core 10-dataset master benchmark using heterogeneous scheduling into final_master namespace."""
     from main import HeterogeneousJobScheduler, JobDescriptor
 
     if datasets is None:
@@ -68,8 +71,13 @@ def run_tier1_benchmark(
     if seeds is None:
         seeds = SEEDS
 
-    out_csv = OUTPUTS_METRICS / "tier1_core10_results.csv"
+    # Ensure clean final_master output namespace and write provenance manifest
+    out_csv = Path(results_path) if results_path else (OUTPUTS_FINAL_MASTER / "metrics" / "tier1_core10_results.csv")
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    generate_experiment_manifest(OUTPUTS_FINAL_MASTER)
+
     logger.info(f"Starting Tier 1 Master Benchmark on 10 Core Datasets: {datasets}...")
+    logger.info(f"Target Output CSV: {out_csv}")
 
     scheduler = HeterogeneousJobScheduler(device_override=device_override, fast_mode=fast_mode)
     jobs: List[JobDescriptor] = []
@@ -103,7 +111,7 @@ def run_tier1_benchmark(
             primary_model="ccr",
             baseline_models=[m for m in models if m != "ccr"],
         )
-        sig_path = OUTPUTS_METRICS / "tier1_statistical_significance_fdr.csv"
+        sig_path = out_csv.parent / "tier1_statistical_significance_fdr.csv"
         sig_df.to_csv(sig_path, index=False)
         logger.info(f"Saved FDR-corrected statistical analysis to {sig_path}")
 

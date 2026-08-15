@@ -1,44 +1,49 @@
-"""CCR-Tabular — Master Heterogeneous Resource-Aware Execution Orchestrator.
+"""CCR-Tabular — Master Heterogeneous Parallel Resource-Aware Orchestrator.
 
-Centralized execution layer controlling:
-  - CPU process pooling capped at (logical_cores - 3) with 1 BLAS thread per worker.
-  - GPU single-slot execution with runtime dynamic VRAM query (20% headroom).
-  - Heterogeneous job routing (CPU-first for GBDT/Stats, GPU-first for Neural Networks).
-  - Dynamic micro-batch scaling and OOM recovery with batch size caching.
+Centralized high-throughput execution layer providing:
+  - Heterogeneous concurrent scheduling: CPU process pool (GBDT/Stats) + 1 dedicated GPU execution slot (Neural).
+  - Strict CPU core budgeting: logical_cores - 3, bounded by RAM-safe worker scaling.
+  - BLAS/LAPACK single-thread locking to prevent thread oversubscription.
+  - Dynamic runtime VRAM querying (mem_get_info) with 20% safe headroom (no fabricated telemetry).
+  - Dynamic micro-batch scaling with rich-keyed batch size caching and explicit CPU fallback on OOM.
   - Automatic FP16 AMP mixed precision on CUDA.
-  - In-memory fold preprocessing caching to eliminate disk/compute bottlenecks.
+  - In-memory fold preprocessing caching to eliminate filesystem and encoding bottlenecks.
+  - Atomic run tracking, pending-job planner, and comprehensive end-of-run execution diagnostics.
 
 Usage:
-    # ── System Diagnostics & Audits ────────────────────────────────────────────
-    python main.py --resource_report    # Audit logical cores, VRAM headroom, AMP
+    python main.py --resource_report    # Full CPU, RAM, and GPU telemetry audit
     python main.py --validate           # Automated 5-point scientific consistency check
-    python main.py --dry_run            # Preview execution matrix and device routing
-    python main.py --smoke_test         # 5-second diagnostic verification
+    python main.py --dry_run            # Preview pending jobs, routing, and memory allocations
+    python main.py --smoke_test         # 5-second end-to-end diagnostic verification
+    python main.py --figures            # Generate 7 main publication figures + supplementals
 
-    # ── High-Throughput Execution Modes ────────────────────────────────────────
-    python main.py --all --fast         # Run full benchmark in optimized fast mode
-    python main.py --tier1 --fast       # Run Tier 1 Core-10 benchmark in fast mode
-    python main.py --tier3 --fast       # Run Tier 3 Architecture Transfer (MLP/ResNet/FT-Transformer)
+    python main.py --tier1 --fast       # Run Tier 1 Core-10 benchmark with parallel routing
+    python main.py --tier3 --fast       # Run Tier 3 Architecture Transfer (MLP / ResNet / Transformer)
+    python main.py --all --fast         # Run 1-Go master benchmark suite with checkpoint resumption
 """
 
 import os
 import sys
 
-# Prevent worker thread oversubscription across BLAS/LAPACK libraries
+# ── 1. Thread Safety: Prevent Library Oversubscription ─────────────────────────
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import argparse
+import concurrent.futures
 import gc
 import logging
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 _ROOT = Path(__file__).parent
 sys.path.insert(0, str(_ROOT))
 
+import psutil
 import torch
 
 from src.utils.config import (
@@ -48,6 +53,7 @@ from src.utils.config import (
     LEARNING_RATE,
     MULTICLASS_DATASETS,
     N_FOLDS,
+    OPTIMIZER,
     OUTPUTS_METRICS,
     REAL_WORLD_DATASETS,
     SEEDS,
@@ -55,33 +61,120 @@ from src.utils.config import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("CCR-Scheduler")
+logger = logging.getLogger("CCR-Orchestrator")
 
-# Resource Management Constants
+# ── Resource Constraints ───────────────────────────────────────────────────────
 CPU_RESERVED_CORES: int = 3
+RAM_ESTIMATE_PER_WORKER_MB: int = 1024  # Estimated RAM per CPU worker
+RAM_SAFETY_FRACTION: float = 0.75
 GPU_SAFETY_FRACTION: float = 0.80
 GPU_MIN_FREE_MB: int = 1024
 MAX_OOM_RETRIES: int = 3
 
-# Cache for discovered optimal batch sizes per (model_type, dataset_scale)
-_BATCH_SIZE_CACHE: Dict[Tuple[str, str], int] = {}
+# Rich batch size cache: key = (architecture, model, dataset, dtype, device)
+_BATCH_SIZE_CACHE: Dict[Tuple[str, str, str, str, str], int] = {}
+
+CPU_PREFERRED_MODELS: Set[str] = {
+    "xgboost", "xgboost_default", "xgboost_weighted",
+    "lightgbm", "lightgbm_default", "catboost", "catboost_default",
+}
+
+
+# ── Job Descriptor ─────────────────────────────────────────────────────────────
+
+@dataclass
+class JobDescriptor:
+    """Atomic unit of experimental cross-validation work."""
+    dataset: str
+    model: str
+    noise_type: str = "none"
+    noise_rate: float = 0.0
+    architecture: str = "mlp"
+    optimizer: str = OPTIMIZER
+    seeds: Optional[List[int]] = None
+    n_folds: int = N_FOLDS
+    instrument_batch: bool = False
+    results_path: Optional[str] = None
+    tier_name: str = "benchmark"
+
+    @property
+    def is_gpu_preferred(self) -> bool:
+        return self.model.lower() not in CPU_PREFERRED_MODELS
+
+
+# ── Standalone Worker Function for Multiprocessing ─────────────────────────────
+
+def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch_size: int = 128, use_amp: bool = False) -> Dict[str, Any]:
+    """Execute a single cross-validation job in a worker process."""
+    from src.training.cross_validation import run_cross_validation
+
+    res_path = Path(job_dict["results_path"]) if job_dict.get("results_path") else None
+    device = torch.device(device_str)
+
+    t0 = time.perf_counter()
+    df = run_cross_validation(
+        dataset_name=job_dict["dataset"],
+        model_name=job_dict["model"],
+        noise_type=job_dict["noise_type"],
+        noise_rate=job_dict["noise_rate"],
+        architecture=job_dict["architecture"],
+        optimizer_name=job_dict["optimizer"],
+        seeds=job_dict["seeds"] or SEEDS,
+        n_folds=job_dict["n_folds"],
+        instrument_batch=job_dict["instrument_batch"],
+        results_path=res_path,
+        batch_size=batch_size,
+        device=device,
+        use_amp=use_amp,
+    )
+    elapsed = time.perf_counter() - t0
+
+    return {
+        "status": "SUCCESS",
+        "dataset": job_dict["dataset"],
+        "model": job_dict["model"],
+        "noise_type": job_dict["noise_type"],
+        "noise_rate": job_dict["noise_rate"],
+        "n_rows": len(df) if df is not None else 0,
+        "elapsed_s": elapsed,
+        "device": device_str,
+    }
 
 
 # ── System Resource Profiling ──────────────────────────────────────────────────
 
+def get_ram_resource_profile() -> Dict[str, Any]:
+    """Query total, available, and used system memory."""
+    vm = psutil.virtual_memory()
+    proc = psutil.Process()
+    return {
+        "total_ram_mb": int(vm.total / (1024 * 1024)),
+        "available_ram_mb": int(vm.available / (1024 * 1024)),
+        "used_ram_mb": int(vm.used / (1024 * 1024)),
+        "percent_used": vm.percent,
+        "process_rss_mb": int(proc.memory_info().rss / (1024 * 1024)),
+    }
+
+
 def get_cpu_worker_budget() -> int:
-    """Calculate safe CPU worker budget leaving reserved cores free."""
+    """Calculate safe CPU worker budget bounded by logical cores and available RAM."""
     logical_cores = os.cpu_count() or 4
-    return max(1, logical_cores - CPU_RESERVED_CORES)
+    core_budget = max(1, logical_cores - CPU_RESERVED_CORES)
+
+    ram_prof = get_ram_resource_profile()
+    safe_ram_mb = ram_prof["available_ram_mb"] * RAM_SAFETY_FRACTION
+    ram_worker_cap = max(1, int(safe_ram_mb / RAM_ESTIMATE_PER_WORKER_MB))
+
+    return max(1, min(core_budget, ram_worker_cap))
 
 
 def get_gpu_resource_profile(device_override: str = "auto") -> Dict[str, Any]:
-    """Query runtime GPU state, free VRAM, and compute safe working budget."""
+    """Query runtime GPU state without fabricating telemetry on failure."""
     if device_override == "cpu" or not torch.cuda.is_available():
         return {
             "cuda_available": False,
             "device": "cpu",
-            "name": "CPU Fallback",
+            "name": "CPU",
             "total_vram_mb": 0,
             "free_vram_mb": 0,
             "safe_vram_mb": 0,
@@ -105,15 +198,15 @@ def get_gpu_resource_profile(device_override: str = "auto") -> Dict[str, Any]:
             "amp_enabled": use_gpu,
         }
     except Exception as e:
-        logger.warning(f"Unable to query CUDA memory: {e}. Falling back to standard device detection.")
+        logger.warning(f"CUDA memory query failed ({e}). Falling back strictly to CPU.")
         return {
-            "cuda_available": True,
-            "device": "cuda",
-            "name": "CUDA Device",
-            "total_vram_mb": 4096,
-            "free_vram_mb": 2048,
-            "safe_vram_mb": 1600,
-            "amp_enabled": True,
+            "cuda_available": False,
+            "device": "cpu",
+            "name": "CUDA State Unknown (CPU Fallback)",
+            "total_vram_mb": 0,
+            "free_vram_mb": 0,
+            "safe_vram_mb": 0,
+            "amp_enabled": False,
         }
 
 
@@ -121,14 +214,18 @@ def print_resource_report() -> None:
     """Print comprehensive hardware and resource budget report."""
     logical_cores = os.cpu_count() or 4
     usable_workers = get_cpu_worker_budget()
+    ram_prof = get_ram_resource_profile()
     gpu_prof = get_gpu_resource_profile("auto")
 
     print("\n=================================================================")
     print("      CCR-TABULAR HETEROGENEOUS RESOURCE AUDIT REPORT           ")
     print("=================================================================")
-    print("CPU Subsystem:")
+    print("CPU & RAM Subsystem:")
     print(f"  Logical Cores:        {logical_cores}")
     print(f"  Reserved Cores:       {CPU_RESERVED_CORES} (Protected for OS/UI)")
+    print(f"  Total System RAM:     {ram_prof['total_ram_mb']} MB ({ram_prof['total_ram_mb']/1024:.1f} GB)")
+    print(f"  Available RAM:        {ram_prof['available_ram_mb']} MB ({ram_prof['available_ram_mb']/1024:.1f} GB)")
+    print(f"  Process RSS:          {ram_prof['process_rss_mb']} MB")
     print(f"  Usable Worker Budget: {usable_workers} concurrent processes")
     print(f"  BLAS Thread Cap:      1 thread/worker (Oversubscription Protection Active)")
     print("\nGPU Subsystem:")
@@ -142,79 +239,281 @@ def print_resource_report() -> None:
     print("=================================================================\n")
 
 
-# ── Heterogeneous Job Execution Engine ─────────────────────────────────────────
+# ── Heterogeneous Concurrent Scheduler ─────────────────────────────────────────
 
-def execute_safe_cross_validation(
-    dataset_name: str,
-    model_name: str,
-    noise_type: str = "none",
-    noise_rate: float = 0.0,
-    architecture: str = "mlp",
-    seeds: Optional[List[int]] = None,
-    n_folds: int = N_FOLDS,
-    instrument_batch: bool = False,
-    device_mode: str = "auto",
-    fast_mode: bool = True,
-) -> Optional[Any]:
-    """Execute cross-validation with heterogeneous routing, dynamic batch scaling, and OOM recovery."""
-    from src.training.cross_validation import run_cross_validation
+class HeterogeneousJobScheduler:
+    """Orchestrates CPU process pool and dedicated GPU worker concurrently."""
 
-    gpu_prof = get_gpu_resource_profile(device_mode)
-    target_device = torch.device(gpu_prof["device"])
-    use_amp = gpu_prof["amp_enabled"]
+    def __init__(self, device_override: str = "auto", fast_mode: bool = True):
+        self.device_override = device_override
+        self.fast_mode = fast_mode
+        self.gpu_prof = get_gpu_resource_profile(device_override)
+        self.cpu_workers = get_cpu_worker_budget()
 
-    # Retrieve cached batch size if available
-    cache_key = (f"{architecture}_{model_name}", dataset_name)
-    base_batch_size = _BATCH_SIZE_CACHE.get(cache_key, BATCH_SIZE)
-    retries = 0
+        # Telemetry counters
+        self.stats = {
+            "requested": 0,
+            "completed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "oom_recovered": 0,
+            "cpu_runs": 0,
+            "gpu_runs": 0,
+            "cpu_fallback_runs": 0,
+            "start_time": time.time(),
+        }
 
-    while retries <= MAX_OOM_RETRIES:
+    def _is_job_complete(self, job: JobDescriptor) -> bool:
+        """Check if all fold/seed combinations for this job exist in target CSV."""
+        import pandas as pd
+        from src.training.train import make_run_id
+
+        target_csv = Path(job.results_path) if job.results_path else (OUTPUTS_METRICS / "results.csv")
+        if not target_csv.exists():
+            return False
+
         try:
-            # Clean allocator cache prior to execution
-            if torch.cuda.is_available():
-                gc.collect()
-                torch.cuda.empty_cache()
+            df = pd.read_csv(target_csv)
+            if "run_id" not in df.columns:
+                return False
 
-            df_out = run_cross_validation(
-                dataset_name=dataset_name,
-                model_name=model_name,
-                noise_type=noise_type,
-                noise_rate=noise_rate,
-                architecture=architecture,
-                seeds=seeds or SEEDS,
-                n_folds=n_folds,
-                instrument_batch=instrument_batch and not fast_mode,
-                batch_size=base_batch_size,
-                device=target_device,
-                use_amp=use_amp,
-            )
+            existing_runs = set(df["run_id"].values)
+            seeds = job.seeds or SEEDS
 
-            # Record successful batch size
-            _BATCH_SIZE_CACHE[cache_key] = base_batch_size
-            return df_out
+            for s in seeds:
+                for f in range(1, job.n_folds + 1):
+                    rid = make_run_id(
+                        dataset_name=job.dataset,
+                        model_name=job.model,
+                        noise_type=job.noise_type,
+                        noise_rate=job.noise_rate,
+                        seed=s,
+                        fold=f,
+                        architecture=job.architecture,
+                    )
+                    if rid not in existing_runs:
+                        return False
+            return True
+        except Exception:
+            return False
 
-        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            if "out of memory" in str(e).lower() or isinstance(e, torch.cuda.OutOfMemoryError):
-                retries += 1
-                new_batch = max(16, base_batch_size // 2)
-                logger.warning(
-                    f"CUDA OOM on [{dataset_name}-{model_name}-{architecture}] (Attempt {retries}/{MAX_OOM_RETRIES}). "
-                    f"Clearing cache and scaling batch size: {base_batch_size} -> {new_batch}."
-                )
+    def filter_pending_jobs(self, jobs: List[JobDescriptor]) -> Tuple[List[JobDescriptor], int]:
+        """Pending-job planner: inspects target CSVs and extracts only uncompleted jobs."""
+        pending = []
+        skipped = 0
+
+        for job in jobs:
+            if self._is_job_complete(job):
+                skipped += 1
+            else:
+                pending.append(job)
+
+        self.stats["requested"] += len(jobs)
+        self.stats["skipped"] += skipped
+        return pending, skipped
+
+    def execute_gpu_job_with_oom_recovery(self, job: JobDescriptor) -> Dict[str, Any]:
+        """Execute a neural job on the dedicated GPU slot with dynamic batch scaling and clean CPU fallback."""
+        from src.training.cross_validation import run_cross_validation
+
+        arch = job.architecture
+        model_name = job.model
+        dataset = job.dataset
+        device_str = self.gpu_prof["device"]
+        use_amp = self.gpu_prof["amp_enabled"]
+
+        cache_key = (arch, model_name, dataset, "float32", device_str)
+        batch_size = _BATCH_SIZE_CACHE.get(cache_key, BATCH_SIZE)
+
+        res_path = Path(job.results_path) if job.results_path else None
+        retries = 0
+
+        while retries <= MAX_OOM_RETRIES:
+            try:
                 if torch.cuda.is_available():
                     gc.collect()
                     torch.cuda.empty_cache()
 
-                base_batch_size = new_batch
-                _BATCH_SIZE_CACHE[cache_key] = base_batch_size
+                t0 = time.perf_counter()
+                df = run_cross_validation(
+                    dataset_name=dataset,
+                    model_name=model_name,
+                    noise_type=job.noise_type,
+                    noise_rate=job.noise_rate,
+                    architecture=arch,
+                    optimizer_name=job.optimizer,
+                    seeds=job.seeds or SEEDS,
+                    n_folds=job.n_folds,
+                    instrument_batch=job.instrument_batch and not self.fast_mode,
+                    results_path=res_path,
+                    batch_size=batch_size,
+                    device=torch.device(device_str),
+                    use_amp=use_amp,
+                )
+                elapsed = time.perf_counter() - t0
 
-                if retries > MAX_OOM_RETRIES:
-                    logger.warning(f"Exceeded maximum OOM retries on GPU for {dataset_name}. Falling back to CPU.")
-                    target_device = torch.device("cpu")
-                    use_amp = False
+                _BATCH_SIZE_CACHE[cache_key] = batch_size
+                if device_str == "cuda":
+                    self.stats["gpu_runs"] += 1
+                else:
+                    self.stats["cpu_runs"] += 1
+                self.stats["completed"] += 1
+
+                return {
+                    "status": "SUCCESS",
+                    "dataset": dataset,
+                    "model": model_name,
+                    "device": device_str,
+                    "elapsed_s": elapsed,
+                    "rows": len(df) if df is not None else 0,
+                }
+
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                is_oom = ("out of memory" in str(e).lower()) or isinstance(e, torch.cuda.OutOfMemoryError)
+                if is_oom and device_str == "cuda":
+                    retries += 1
+                    self.stats["oom_recovered"] += 1
+                    new_batch = max(16, batch_size // 2)
+                    logger.warning(
+                        f"[OOM RECOVERY] [{dataset}-{model_name}-{arch}] GPU OOM (Attempt {retries}/{MAX_OOM_RETRIES}). "
+                        f"Scaling batch size: {batch_size} -> {new_batch}."
+                    )
+                    batch_size = new_batch
+                    _BATCH_SIZE_CACHE[cache_key] = batch_size
+
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
+                    if retries > MAX_OOM_RETRIES:
+                        logger.warning(f"[CPU FALLBACK] Max GPU OOM retries exceeded on {dataset}-{model_name}. Rerunning cleanly on CPU.")
+                        self.stats["cpu_fallback_runs"] += 1
+                        break
+                else:
+                    logger.error(f"Job execution failed on {dataset}-{model_name}: {e}")
+                    self.stats["failed"] += 1
+                    return {"status": "FAILED", "dataset": dataset, "model": model_name, "error": str(e)}
+
+        # Clean explicit CPU fallback after GPU retries exhausted
+        try:
+            logger.info(f"Executing clean CPU fallback for [{dataset}-{model_name}-{arch}]...")
+            t0 = time.perf_counter()
+            df = run_cross_validation(
+                dataset_name=dataset,
+                model_name=model_name,
+                noise_type=job.noise_type,
+                noise_rate=job.noise_rate,
+                architecture=arch,
+                optimizer_name=job.optimizer,
+                seeds=job.seeds or SEEDS,
+                n_folds=job.n_folds,
+                instrument_batch=job.instrument_batch and not self.fast_mode,
+                results_path=res_path,
+                batch_size=max(32, batch_size),
+                device=torch.device("cpu"),
+                use_amp=False,
+            )
+            elapsed = time.perf_counter() - t0
+            self.stats["cpu_runs"] += 1
+            self.stats["completed"] += 1
+            return {"status": "SUCCESS_CPU_FALLBACK", "dataset": dataset, "model": model_name, "device": "cpu", "elapsed_s": elapsed}
+        except Exception as e_cpu:
+            logger.error(f"CPU fallback also failed on {dataset}-{model_name}: {e_cpu}")
+            self.stats["failed"] += 1
+            return {"status": "FAILED", "dataset": dataset, "model": model_name, "error": str(e_cpu)}
+
+    def run_jobs_heterogeneous(self, jobs: List[JobDescriptor]) -> List[Dict[str, Any]]:
+        """Run CPU queue (process pool) and GPU queue (single slot) concurrently."""
+        pending_jobs, skipped_count = self.filter_pending_jobs(jobs)
+        logger.info(f"Queue Status: Total Requested={len(jobs)} | Skipped (Existing)={skipped_count} | Pending={len(pending_jobs)}")
+
+        if not pending_jobs:
+            logger.info("All requested jobs are already completed. Nothing to execute.")
+            return []
+
+        cpu_queue: List[JobDescriptor] = []
+        gpu_queue: List[JobDescriptor] = []
+
+        for j in pending_jobs:
+            if j.is_gpu_preferred and self.gpu_prof["cuda_available"]:
+                gpu_queue.append(j)
             else:
-                logger.error(f"Execution error on {dataset_name}-{model_name}: {e}")
-                raise e
+                cpu_queue.append(j)
+
+        logger.info(f"Heterogeneous Queue Breakdown: CPU Queue={len(cpu_queue)} jobs | GPU Queue={len(gpu_queue)} jobs")
+        results: List[Dict[str, Any]] = []
+
+        # Execute GPU jobs sequentially on dedicated GPU slot while CPU workers process CPU jobs
+        def _process_gpu_queue() -> List[Dict[str, Any]]:
+            gpu_res = []
+            for idx, g_job in enumerate(gpu_queue, start=1):
+                logger.info(f"[GPU Worker {idx}/{len(gpu_queue)}] Starting: {g_job.dataset} | {g_job.model} | {g_job.noise_type}@{g_job.noise_rate:.0%}")
+                res = self.execute_gpu_job_with_oom_recovery(g_job)
+                gpu_res.append(res)
+            return gpu_res
+
+        def _process_cpu_queue() -> List[Dict[str, Any]]:
+            cpu_res = []
+            if not cpu_queue:
+                return cpu_res
+
+            logger.info(f"[CPU Worker Pool] Launching {len(cpu_queue)} jobs across {self.cpu_workers} worker processes...")
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.cpu_workers) as executor:
+                future_to_job = {
+                    executor.submit(_worker_execute_job, asdict(c_job), "cpu", 128, False): c_job
+                    for c_job in cpu_queue
+                }
+                for future in concurrent.futures.as_completed(future_to_job):
+                    c_job = future_to_job[future]
+                    try:
+                        res = future.result()
+                        self.stats["completed"] += 1
+                        self.stats["cpu_runs"] += 1
+                        cpu_res.append(res)
+                        logger.info(f"[CPU Done] {res['dataset']} | {res['model']} in {res['elapsed_s']:.1f}s")
+                    except Exception as exc:
+                        logger.error(f"[CPU Failed] {c_job.dataset} | {c_job.model}: {exc}")
+                        self.stats["failed"] += 1
+                        cpu_res.append({"status": "FAILED", "dataset": c_job.dataset, "model": c_job.model, "error": str(exc)})
+            return cpu_res
+
+        # Run CPU Pool and GPU Queue concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as coordinator:
+            future_gpu = coordinator.submit(_process_gpu_queue)
+            future_cpu = coordinator.submit(_process_cpu_queue)
+
+            res_gpu = future_gpu.result()
+            res_cpu = future_cpu.result()
+
+            results.extend(res_gpu)
+            results.extend(res_cpu)
+
+        return results
+
+    def print_final_summary(self) -> None:
+        """Print comprehensive end-of-run execution diagnostics."""
+        elapsed_total = time.time() - self.stats["start_time"]
+        ram_prof = get_ram_resource_profile()
+        gpu_prof = get_gpu_resource_profile("auto")
+
+        print("\n=================================================================")
+        print("          CCR-TABULAR FINAL EXECUTION SUMMARY REPORT             ")
+        print("=================================================================")
+        print(f"Total Wall-Clock Time:   {elapsed_total:.2f}s ({elapsed_total/60:.2f} min)")
+        print(f"Requested Jobs:          {self.stats['requested']}")
+        print(f"Completed Successfully:  {self.stats['completed']}")
+        print(f"Skipped (Pre-existing):  {self.stats['skipped']}")
+        print(f"Failed Jobs:             {self.stats['failed']}")
+        print(f"CUDA OOM Recoveries:     {self.stats['oom_recovered']}")
+        print(f"GPU Training Runs:       {self.stats['gpu_runs']}")
+        print(f"CPU Training Runs:       {self.stats['cpu_runs']}")
+        print(f"CPU Fallback Runs:       {self.stats['cpu_fallback_runs']}")
+        print("-" * 65)
+        print("Resource Utilization:")
+        print(f"  CPU Workers Utilized:  {self.cpu_workers}")
+        print(f"  Current System RAM:    {ram_prof['used_ram_mb']} MB / {ram_prof['total_ram_mb']} MB ({ram_prof['percent_used']}%)")
+        print(f"  Current Free VRAM:     {gpu_prof['free_vram_mb']} MB / {gpu_prof['total_vram_mb']} MB")
+        print("=================================================================\n")
 
 
 # ── Dry Run Planner ────────────────────────────────────────────────────────────
@@ -226,8 +525,9 @@ def run_dry_run_planner(target_tiers: List[str], device_mode: str = "auto") -> N
     print("=================================================================")
     gpu_prof = get_gpu_resource_profile(device_mode)
     cpu_budget = get_cpu_worker_budget()
+    ram_prof = get_ram_resource_profile()
 
-    print(f"Target Device: {gpu_prof['device'].upper()} | Safe VRAM: {gpu_prof['safe_vram_mb']} MB | CPU Workers: {cpu_budget}")
+    print(f"Target Device: {gpu_prof['device'].upper()} | Safe VRAM: {gpu_prof['safe_vram_mb']} MB | CPU Workers: {cpu_budget} | Available RAM: {ram_prof['available_ram_mb']/1024:.1f} GB")
     print("-" * 65)
 
     for tier in target_tiers:
@@ -254,11 +554,18 @@ def run_dry_run_planner(target_tiers: List[str], device_mode: str = "auto") -> N
 
 # ── Unified 1-Go Master Runner ─────────────────────────────────────────────────
 
-def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> None:
-    """Execute all benchmark tiers sequentially in one optimized workflow."""
+def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> int:
+    """Execute all benchmark tiers sequentially in one optimized workflow.
+    
+    Returns:
+        0 if all tiers succeeded, 1 if any tier encountered errors.
+    """
     logger.info("=================================================================")
     logger.info("        STARTING UNIFIED 1-GO CCR-TABULAR MASTER SUITE          ")
     logger.info("=================================================================")
+
+    scheduler = HeterogeneousJobScheduler(device_override=device_mode, fast_mode=fast_mode)
+    failed_tiers: List[str] = []
 
     # 1. Scientific Consistency Audit Pre-Check
     logger.info(">>> Step 1/11: Running Pre-Publication Scientific Consistency Audit...")
@@ -267,6 +574,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_scientific_validation()
     except Exception as e:
         logger.error(f"Error in Pre-Audit: {e}")
+        failed_tiers.append("Pre-Audit")
 
     # 2. Synthetic Toy & Negative Controls (Tier 6)
     logger.info(">>> Step 2/11: Running Tier 6 Synthetic Toy & Negative Controls...")
@@ -280,6 +588,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_negative_controls_experiment(out)
     except Exception as e:
         logger.error(f"Error in Tier 6: {e}")
+        failed_tiers.append("Tier 6")
 
     # 3. S/B Investigation
     logger.info(">>> Step 3/11: Running S/B Theoretical Bounds & Empirical Measurement...")
@@ -288,6 +597,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_sb_empirical_measurement()
     except Exception as e:
         logger.error(f"Error in S/B Investigation: {e}")
+        failed_tiers.append("S/B Investigation")
 
     # 4. Direct Mechanism Validation with Batch Telemetry (Tier 2)
     logger.info(">>> Step 4/11: Running Tier 2 Direct Mechanism Validation...")
@@ -302,6 +612,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         analyze_mechanism_telemetry()
     except Exception as e:
         logger.error(f"Error in Tier 2: {e}")
+        failed_tiers.append("Tier 2")
 
     # 5. Pure Normalization Controls
     logger.info(">>> Step 5/11: Running Pure Normalization Controls...")
@@ -312,6 +623,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         analyze_pure_controls()
     except Exception as e:
         logger.error(f"Error in Pure Controls: {e}")
+        failed_tiers.append("Pure Controls")
 
     # 6. Per-Sample Gradient Attribution & Figure 5
     logger.info(">>> Step 6/11: Running Per-Sample Gradient Attribution & Figure 5...")
@@ -320,6 +632,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_gradient_attribution_study()
     except Exception as e:
         logger.error(f"Error in Gradient Attribution: {e}")
+        failed_tiers.append("Gradient Attribution")
 
     # 7. Optimizer Sensitivity Study
     logger.info(">>> Step 7/11: Running Optimizer Sensitivity Study (SGD vs Adam vs AdamW)...")
@@ -330,6 +643,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         analyze_optimizer_study()
     except Exception as e:
         logger.error(f"Error in Optimizer Study: {e}")
+        failed_tiers.append("Optimizer Study")
 
     # 8. Multiclass Transfer (Tier 4)
     logger.info(">>> Step 8/11: Running Tier 4 Multiclass Transfer Benchmark...")
@@ -338,6 +652,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_tier4_multiclass_experiments()
     except Exception as e:
         logger.error(f"Error in Tier 4: {e}")
+        failed_tiers.append("Tier 4")
 
     # 9. Real-World External Validation (Tier 5)
     logger.info(">>> Step 9/11: Running Tier 5 Real-World External Validation...")
@@ -346,6 +661,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_tier5_natural_noise_experiments()
     except Exception as e:
         logger.error(f"Error in Tier 5: {e}")
+        failed_tiers.append("Tier 5")
 
     # 10. Architecture Transferability (Tier 3)
     logger.info(">>> Step 10/11: Running Tier 3 Architecture Transferability...")
@@ -354,6 +670,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_tier3_architecture_experiments()
     except Exception as e:
         logger.error(f"Error in Tier 3: {e}")
+        failed_tiers.append("Tier 3")
 
     # 11. Core 10-Dataset Master Benchmark (Tier 1)
     logger.info(">>> Step 11/11: Running Tier 1 Core-10 Master Benchmark...")
@@ -362,6 +679,7 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_tier1_benchmark()
     except Exception as e:
         logger.error(f"Error in Tier 1: {e}")
+        failed_tiers.append("Tier 1")
 
     # Final Canonical Consolidation, Figures & Verification
     logger.info(">>> Consolidating Canonical Master Results Store & Generating Figures...")
@@ -374,10 +692,18 @@ def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> No
         run_scientific_validation()
     except Exception as e:
         logger.error(f"Error in Final Consolidation: {e}")
+        failed_tiers.append("Final Consolidation")
 
-    logger.info("=================================================================")
-    logger.info("   UNIFIED 1-GO CCR-TABULAR SUITE EXECUTION SUCCESSFULLY FINISHED ")
-    logger.info("=================================================================")
+    scheduler.print_final_summary()
+
+    if failed_tiers:
+        logger.error(f"Execution completed with failures in tiers: {failed_tiers}")
+        return 1
+    else:
+        logger.info("=================================================================")
+        logger.info("   UNIFIED 1-GO CCR-TABULAR SUITE EXECUTION SUCCESSFULLY FINISHED ")
+        logger.info("=================================================================")
+        return 0
 
 
 # ── Main Entry Point ───────────────────────────────────────────────────────────
@@ -404,10 +730,12 @@ def main() -> None:
     parser.add_argument("--figures", action="store_true", help="Generate all publication and supplementary figures.")
     parser.add_argument("--smoke_test", action="store_true", help="Run quick 2-fold diagnostic smoke test.")
 
-    parser.add_argument("--fast", action="store_true", default=True, help="High-efficiency execution mode (in-memory fold caching, FP16 AMP).")
-    parser.add_argument("--safe", action="store_true", help="Conservative execution mode.")
-    parser.add_argument("--device", type=str, choices=["auto", "cpu", "cuda"], default="auto", help="Device execution target.")
+    # Execution Mode: Fast vs Safe
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--fast", action="store_true", help="Enable high-throughput execution (in-memory fold caching, FP16 AMP).")
+    mode_group.add_argument("--safe", action="store_true", help="Use conservative single-threaded execution.")
 
+    parser.add_argument("--device", type=str, choices=["auto", "cpu", "cuda"], default="auto", help="Device execution target.")
     parser.add_argument("--dataset", type=str, default=None, help="Dataset name.")
     parser.add_argument("--model", type=str, default=None, help="Model or loss name.")
     parser.add_argument("--noise_type", type=str, default="none", help="Noise type.")
@@ -416,7 +744,7 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 2024], help="Random seeds.")
 
     args = parser.parse_args()
-    fast_mode = not args.safe
+    fast_mode = not args.safe  # Default is fast mode unless --safe explicitly specified
 
     if args.resource_report:
         print_resource_report()
@@ -434,7 +762,8 @@ def main() -> None:
         run_dry_run_planner(target, device_mode=args.device)
 
     elif args.all:
-        run_all_experiments(device_mode=args.device, fast_mode=fast_mode)
+        exit_code = run_all_experiments(device_mode=args.device, fast_mode=fast_mode)
+        sys.exit(exit_code)
 
     elif args.tier6:
         from experiments.run_tier6_toy_controls import (

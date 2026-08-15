@@ -126,3 +126,54 @@ def test_elr_loss_regularization_term():
     loss.backward()
     assert logits.grad is not None
     assert torch.isfinite(logits.grad).all()
+
+
+def test_tier1_cartesian_product_audit_validator():
+    """Verify that audit_tier1_cartesian_product accurately checks all 6,000 configurations."""
+    from src.analysis.final_validation import audit_tier1_cartesian_product
+    from src.utils.config import CORE_10_DATASETS, LOSS_NAMES, SEEDS
+
+    # 1. Empty dataframe fails
+    res_empty = audit_tier1_cartesian_product(pd.DataFrame())
+    assert res_empty["expected"] == 6000
+    assert res_empty["found"] == 0
+    assert res_empty["missing"] == 6000
+    assert not res_empty["passed"]
+
+    # 2. Incomplete dataframe reports missing
+    df_partial = pd.DataFrame([{
+        "dataset": CORE_10_DATASETS[0],
+        "model": LOSS_NAMES[0],
+        "noise_type": "none",
+        "noise_rate": 0.0,
+        "seed": SEEDS[0],
+        "fold": 1,
+        "status": "SUCCESS",
+    }])
+    res_partial = audit_tier1_cartesian_product(df_partial)
+    assert res_partial["found"] == 1
+    assert res_partial["missing"] == 5999
+    assert not res_partial["passed"]
+
+
+def test_scheduler_in_memory_run_id_cache(tmp_path):
+    """Verify that HeterogeneousJobScheduler uses in-memory caching for completion checks."""
+    from main import HeterogeneousJobScheduler, JobDescriptor
+
+    csv_path = tmp_path / "test_results.csv"
+    scheduler = HeterogeneousJobScheduler(device_override="cpu")
+
+    job = JobDescriptor(
+        dataset="adult",
+        model="ccr",
+        noise_type="asym",
+        noise_rate=0.20,
+        results_path=str(csv_path),
+    )
+
+    # Initially not complete
+    assert not scheduler._is_job_complete(job)
+
+    # Register completed job in-memory cache
+    scheduler._register_completed_job_ids(job, csv_path)
+    assert scheduler._is_job_complete(job)

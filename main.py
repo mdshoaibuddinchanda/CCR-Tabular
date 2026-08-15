@@ -247,9 +247,6 @@ def print_resource_report() -> None:
     print(f"  Usable Worker Budget: {usable_workers} concurrent processes")
     print(f"  BLAS Thread Cap:      1 thread/worker (Oversubscription Protection Active)")
     print("\nGPU Subsystem:")
-    print(f"  CUDA Available:       {gpu_prof['cuda_available']}")
-    print(f"  Device Name:          {gpu_prof['name']}")
-    print(f"  Total VRAM:           {gpu_prof['total_vram_mb']} MB")
     print(f"  Current Free VRAM:    {gpu_prof['free_vram_mb']} MB")
     print(f"  Safe Working Budget:  {gpu_prof['safe_vram_mb']} MB (20% Headroom Protected)")
     print(f"  Execution Target:     {gpu_prof['device'].upper()}")
@@ -260,13 +257,14 @@ def print_resource_report() -> None:
 # ── Heterogeneous Concurrent Scheduler ─────────────────────────────────────────
 
 class HeterogeneousJobScheduler:
-    """Orchestrates CPU process pool and dedicated GPU worker concurrently."""
+    """Orchestrates CPU process pool and dedicated GPU worker concurrently with live resource protection."""
 
     def __init__(self, device_override: str = "auto", fast_mode: bool = True):
         self.device_override = device_override
         self.fast_mode = fast_mode
         self.gpu_prof = get_gpu_resource_profile(device_override)
         self.cpu_workers = get_cpu_worker_budget()
+        self._completed_run_ids: Dict[Path, Set[str]] = {}
 
         # Telemetry counters
         self.stats = {
@@ -281,47 +279,82 @@ class HeterogeneousJobScheduler:
             "start_time": time.time(),
         }
 
+    def _get_completed_ids_for_csv(self, target_csv: Path) -> Set[str]:
+        """Retrieve completed run_ids from in-memory cache or load once from disk."""
+        if target_csv not in self._completed_run_ids:
+            if target_csv.exists():
+                try:
+                    df = pd.read_csv(target_csv)
+                    if "run_id" in df.columns:
+                        if "status" in df.columns:
+                            valid_df = df[df["status"].isin(["SUCCESS", "SUCCESS_CPU_FALLBACK"])]
+                            self._completed_run_ids[target_csv] = set(valid_df["run_id"].dropna().values)
+                        else:
+                            self._completed_run_ids[target_csv] = set(df["run_id"].dropna().values)
+                    else:
+                        self._completed_run_ids[target_csv] = set()
+                except Exception:
+                    self._completed_run_ids[target_csv] = set()
+            else:
+                self._completed_run_ids[target_csv] = set()
+        return self._completed_run_ids[target_csv]
+
+    def _register_completed_job_ids(self, job: JobDescriptor, target_csv: Path) -> None:
+        """Register all fold/seed run_ids for a completed job into the in-memory cache."""
+        completed_set = self._get_completed_ids_for_csv(target_csv)
+        seeds = job.seeds or SEEDS
+        from src.training.train import make_run_id
+        for s in seeds:
+            for f in range(1, job.n_folds + 1):
+                rid = make_run_id(
+                    dataset_name=job.dataset,
+                    model_name=job.model,
+                    noise_type=job.noise_type,
+                    noise_rate=job.noise_rate,
+                    seed=s,
+                    fold=f,
+                    architecture=job.architecture,
+                    optimizer_name=job.optimizer,
+                    lr=job.lr,
+                    weight_decay=job.weight_decay,
+                    tau=job.tau,
+                    beta=job.beta,
+                    K_hist=job.K_hist,
+                    batch_size=job.batch_size,
+                    tag=job.tag,
+                )
+                completed_set.add(rid)
+
     def _is_job_complete(self, job: JobDescriptor) -> bool:
-        """Check if all fold/seed combinations for this job exist in target CSV."""
-        import pandas as pd
+        """Check if all fold/seed combinations for this job exist in target CSV (in-memory cached)."""
         from src.training.train import make_run_id
 
         target_csv = Path(job.results_path) if job.results_path else (OUTPUTS_METRICS / "results.csv")
-        if not target_csv.exists():
-            return False
+        existing_runs = self._get_completed_ids_for_csv(target_csv)
+        seeds = job.seeds or SEEDS
 
-        try:
-            df = pd.read_csv(target_csv)
-            if "run_id" not in df.columns:
-                return False
-
-            existing_runs = set(df["run_id"].values)
-            seeds = job.seeds or SEEDS
-
-            for s in seeds:
-                for f in range(1, job.n_folds + 1):
-                    rid = make_run_id(
-                        dataset_name=job.dataset,
-                        model_name=job.model,
-                        noise_type=job.noise_type,
-                        noise_rate=job.noise_rate,
-                        seed=s,
-                        fold=f,
-                        architecture=job.architecture,
-                        optimizer_name=job.optimizer,
-                        lr=job.lr,
-                        weight_decay=job.weight_decay,
-                        tau=job.tau,
-                        beta=job.beta,
-                        K_hist=job.K_hist,
-                        batch_size=job.batch_size,
-                        tag=job.tag,
-                    )
-                    if rid not in existing_runs:
-                        return False
-            return True
-        except Exception:
-            return False
+        for s in seeds:
+            for f in range(1, job.n_folds + 1):
+                rid = make_run_id(
+                    dataset_name=job.dataset,
+                    model_name=job.model,
+                    noise_type=job.noise_type,
+                    noise_rate=job.noise_rate,
+                    seed=s,
+                    fold=f,
+                    architecture=job.architecture,
+                    optimizer_name=job.optimizer,
+                    lr=job.lr,
+                    weight_decay=job.weight_decay,
+                    tau=job.tau,
+                    beta=job.beta,
+                    K_hist=job.K_hist,
+                    batch_size=job.batch_size,
+                    tag=job.tag,
+                )
+                if rid not in existing_runs:
+                    return False
+        return True
 
     def filter_pending_jobs(self, jobs: List[JobDescriptor]) -> Tuple[List[JobDescriptor], int]:
         """Pending-job planner: inspects target CSVs and extracts only uncompleted jobs."""
@@ -339,19 +372,32 @@ class HeterogeneousJobScheduler:
         return pending, skipped
 
     def execute_gpu_job_with_oom_recovery(self, job: JobDescriptor) -> Dict[str, Any]:
-        """Execute a neural job on the dedicated GPU slot with dynamic batch scaling and clean CPU fallback."""
+        """Execute a neural job with per-job live VRAM refresh, dynamic batch scaling, and clean CPU fallback."""
         from src.training.cross_validation import run_cross_validation
 
         arch = job.architecture
         model_name = job.model
         dataset = job.dataset
-        device_str = self.gpu_prof["device"]
-        use_amp = self.gpu_prof["amp_enabled"]
+        res_path = Path(job.results_path) if job.results_path else (OUTPUTS_METRICS / "results.csv")
 
+        # 1. Refresh live GPU memory state before starting this job
+        live_gpu_prof = get_gpu_resource_profile(self.device_override)
+        safe_vram = live_gpu_prof["safe_vram_mb"]
+        cuda_ok = live_gpu_prof["cuda_available"] and (self.device_override != "cpu")
+
+        # 2. Strict VRAM safety check: Fall back to CPU if safe working budget < 500 MB
+        if (not cuda_ok) or (safe_vram < 500):
+            logger.warning(
+                f"[VRAM SAFETY ACTIVE] [{dataset}-{model_name}] Safe VRAM is {safe_vram} MB (< 500 MB threshold). "
+                f"Routing cleanly to CPU fallback to preserve stability."
+            )
+            self.stats["cpu_fallback_runs"] += 1
+            return self._execute_cpu_fallback(job, res_path)
+
+        device_str = live_gpu_prof["device"]
+        use_amp = live_gpu_prof["amp_enabled"]
         cache_key = (arch, model_name, dataset, "float32", device_str)
         batch_size = _BATCH_SIZE_CACHE.get(cache_key, job.batch_size)
-
-        res_path = Path(job.results_path) if job.results_path else None
         retries = 0
 
         while retries <= MAX_OOM_RETRIES:
@@ -376,7 +422,7 @@ class HeterogeneousJobScheduler:
                     tag=job.tag,
                     seeds=job.seeds or SEEDS,
                     n_folds=job.n_folds,
-                    instrument_batch=job.instrument_batch and not self.fast_mode,
+                    instrument_batch=job.instrument_batch,
                     results_path=res_path,
                     batch_size=batch_size,
                     device=torch.device(device_str),
@@ -387,6 +433,7 @@ class HeterogeneousJobScheduler:
                 _BATCH_SIZE_CACHE[cache_key] = batch_size
                 self.stats["gpu_runs"] += 1
                 self.stats["completed"] += 1
+                self._register_completed_job_ids(job, res_path)
 
                 return {
                     "status": "SUCCESS",
@@ -426,16 +473,22 @@ class HeterogeneousJobScheduler:
                 self.stats["failed"] += 1
                 return {"status": "FAILED", "dataset": dataset, "model": model_name, "error": str(e)}
 
-        # Fallback to CPU execution
-        logger.info(f"[CPU FALLBACK] Executing {dataset}-{model_name} on CPU...")
+        # Fallback to CPU execution after OOM retries exhausted
+        self.stats["cpu_fallback_runs"] += 1
+        return self._execute_cpu_fallback(job, res_path)
+
+    def _execute_cpu_fallback(self, job: JobDescriptor, res_path: Path) -> Dict[str, Any]:
+        """Execute a job on CPU fallback cleanly."""
+        from src.training.cross_validation import run_cross_validation
+        logger.info(f"[CPU FALLBACK] Executing {job.dataset}-{job.model} on CPU...")
         t0 = time.perf_counter()
         try:
             df = run_cross_validation(
-                dataset_name=dataset,
-                model_name=model_name,
+                dataset_name=job.dataset,
+                model_name=job.model,
                 noise_type=job.noise_type,
                 noise_rate=job.noise_rate,
-                architecture=arch,
+                architecture=job.architecture,
                 optimizer_name=job.optimizer,
                 lr=job.lr,
                 weight_decay=job.weight_decay,
@@ -445,23 +498,24 @@ class HeterogeneousJobScheduler:
                 tag=job.tag,
                 seeds=job.seeds or SEEDS,
                 n_folds=job.n_folds,
-                instrument_batch=job.instrument_batch and not self.fast_mode,
+                instrument_batch=job.instrument_batch,
                 results_path=res_path,
-                batch_size=max(32, batch_size),
+                batch_size=job.batch_size,
                 device=torch.device("cpu"),
                 use_amp=False,
             )
             elapsed = time.perf_counter() - t0
             self.stats["cpu_runs"] += 1
             self.stats["completed"] += 1
-            return {"status": "SUCCESS_CPU_FALLBACK", "dataset": dataset, "model": model_name, "device": "cpu", "elapsed_s": elapsed}
+            self._register_completed_job_ids(job, res_path)
+            return {"status": "SUCCESS_CPU_FALLBACK", "dataset": job.dataset, "model": job.model, "device": "cpu", "elapsed_s": elapsed}
         except Exception as e_cpu:
-            logger.error(f"CPU fallback also failed on {dataset}-{model_name}: {e_cpu}")
+            logger.error(f"CPU fallback failed on {job.dataset}-{job.model}: {e_cpu}")
             self.stats["failed"] += 1
-            return {"status": "FAILED", "dataset": dataset, "model": model_name, "error": str(e_cpu)}
+            return {"status": "FAILED", "dataset": job.dataset, "model": job.model, "error": str(e_cpu)}
 
     def run_jobs_heterogeneous(self, jobs: List[JobDescriptor]) -> List[Dict[str, Any]]:
-        """Run CPU queue (process pool) and GPU queue (single slot) concurrently."""
+        """Run CPU queue (process pool) and GPU queue (single slot) concurrently with RAM backpressure."""
         pending_jobs, skipped_count = self.filter_pending_jobs(jobs)
         logger.info(f"Queue Status: Total Requested={len(jobs)} | Skipped (Existing)={skipped_count} | Pending={len(pending_jobs)}")
 
@@ -473,7 +527,7 @@ class HeterogeneousJobScheduler:
         gpu_queue: List[JobDescriptor] = []
 
         for j in pending_jobs:
-            if j.is_gpu_preferred and self.gpu_prof["cuda_available"]:
+            if j.is_gpu_preferred and self.gpu_prof["cuda_available"] and (self.device_override != "cpu"):
                 gpu_queue.append(j)
             else:
                 cpu_queue.append(j)
@@ -495,18 +549,31 @@ class HeterogeneousJobScheduler:
             if not cpu_queue:
                 return cpu_res
 
-            logger.info(f"[CPU Worker Pool] Launching {len(cpu_queue)} jobs across {self.cpu_workers} worker processes...")
+            logger.info(f"[CPU Worker Pool] Launching {len(cpu_queue)} jobs across {self.cpu_workers} worker processes with RAM backpressure...")
             with concurrent.futures.ProcessPoolExecutor(max_workers=self.cpu_workers) as executor:
-                future_to_job = {
-                    executor.submit(_worker_execute_job, asdict(c_job), "cpu", 128, False): c_job
-                    for c_job in cpu_queue
-                }
-                for future in concurrent.futures.as_completed(future_to_job):
-                    c_job = future_to_job[future]
+                pending_futures = {}
+                for c_job in cpu_queue:
+                    # Dynamic RAM backpressure check before submitting new process
+                    ram = get_ram_resource_profile()
+                    while ram["available_ram_mb"] < 4096:
+                        logger.warning(
+                            f"[RAM BACKPRESSURE] System available RAM ({ram['available_ram_mb']} MB) < 4.0 GB. "
+                            f"Throttling worker dispatch for 3.0s..."
+                        )
+                        time.sleep(3.0)
+                        ram = get_ram_resource_profile()
+
+                    fut = executor.submit(_worker_execute_job, asdict(c_job), "cpu", c_job.batch_size, False)
+                    pending_futures[fut] = c_job
+
+                for future in concurrent.futures.as_completed(pending_futures):
+                    c_job = pending_futures[future]
                     try:
                         res = future.result()
                         self.stats["completed"] += 1
                         self.stats["cpu_runs"] += 1
+                        target_p = Path(c_job.results_path) if c_job.results_path else (OUTPUTS_METRICS / "results.csv")
+                        self._register_completed_job_ids(c_job, target_p)
                         cpu_res.append(res)
                         logger.info(f"[CPU Done] {res['dataset']} | {res['model']} in {res['elapsed_s']:.1f}s")
                     except Exception as exc:

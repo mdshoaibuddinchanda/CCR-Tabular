@@ -3,7 +3,7 @@
 Structured according to the rigorous 10 + 2 + 2 experimental design:
   - Tier 1: 10 Core Binary Benchmark datasets spanning 5 orders of variation:
             N from 351 to 48,842, IR from 1.35 to 17.50, and 10 diverse domains.
-  - Tier 2 / Multiclass: 2 representative multiclass datasets (Segment, Steel Faults).
+  - Tier 2 / Multiclass: 2 representative multiclass datasets (Segment, Vehicle).
   - Tier 3 / Real-World External Validation: 2 real-world clinical datasets (Heart Disease, Breast Cancer).
 """
 
@@ -20,6 +20,7 @@ OUTPUTS_LOGS = ROOT / "outputs" / "logs"
 OUTPUTS_METRICS = ROOT / "outputs" / "metrics"
 OUTPUTS_PLOTS = ROOT / "outputs" / "plots"
 OUTPUTS_TELEMETRY = ROOT / "outputs" / "telemetry"
+OUTPUTS_FINAL_MASTER = ROOT / "outputs" / "final_master"
 
 for _p in [
     DATA_RAW, DATA_PROCESSED, DATA_NOISY,

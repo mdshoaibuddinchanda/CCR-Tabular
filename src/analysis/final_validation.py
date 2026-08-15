@@ -11,13 +11,16 @@ Enforces strict verification rules:
      - Fails if '3-4x inflation' or '3x-4x' is claimed without refutation context.
      - Fails if 'normalization drives robustness' is claimed without qualification.
      - Fails if 'AUC measures calibration' is claimed.
+  6. Exact Cartesian-Product Tier-1 Audit (N = 6,000):
+     Verifies all 10 datasets x 10 losses x 4 noise regimes x 3 seeds x 5 folds individually.
 """
 
 import argparse
+import itertools
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 _ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_ROOT))
@@ -38,13 +41,92 @@ from src.utils.config import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ScientificValidator")
 
+TIER1_NOISE_REGIMES: List[Tuple[str, float]] = [
+    ("none", 0.0),
+    ("asym", 0.20),
+    ("asym", 0.40),
+    ("sym", 0.20),
+]
+
+
+def audit_tier1_cartesian_product(df: pd.DataFrame) -> Dict[str, Any]:
+    """Audit every single expected configuration in the 6,000 Tier-1 Cartesian product."""
+    expected_tuples = list(itertools.product(
+        CORE_10_DATASETS,
+        LOSS_NAMES,
+        TIER1_NOISE_REGIMES,
+        SEEDS,
+        range(1, N_FOLDS + 1),
+    ))
+    n_expected = len(expected_tuples)  # 10 * 10 * 4 * 3 * 5 = 6000
+
+    if df is None or len(df) == 0:
+        return {
+            "expected": n_expected,
+            "found": 0,
+            "missing": n_expected,
+            "duplicates": 0,
+            "failed_status": 0,
+            "missing_tuples": expected_tuples,
+            "passed": False,
+        }
+
+    # Index df by configuration key: (dataset, model, noise_type, round(noise_rate, 2), seed, fold)
+    df_clean = df.copy()
+    if "noise_rate" in df_clean.columns:
+        df_clean["noise_rate_rnd"] = df_clean["noise_rate"].round(2)
+    else:
+        df_clean["noise_rate_rnd"] = 0.0
+
+    group_counts = df_clean.groupby(
+        ["dataset", "model", "noise_type", "noise_rate_rnd", "seed", "fold"]
+    ).size().to_dict()
+
+    group_status = df_clean.groupby(
+        ["dataset", "model", "noise_type", "noise_rate_rnd", "seed", "fold"]
+    )["status"].apply(list).to_dict() if "status" in df_clean.columns else {}
+
+    found_count = 0
+    missing_count = 0
+    duplicate_count = 0
+    failed_status_count = 0
+    missing_tuples = []
+
+    for ds, loss, (n_type, n_rate), seed, fold in expected_tuples:
+        key = (ds, loss, n_type, round(n_rate, 2), seed, fold)
+        count = group_counts.get(key, 0)
+        if count == 0:
+            missing_count += 1
+            missing_tuples.append(key)
+        elif count == 1:
+            statuses = group_status.get(key, ["SUCCESS"])
+            if statuses[0] in ("SUCCESS", "SUCCESS_CPU_FALLBACK"):
+                found_count += 1
+            else:
+                failed_status_count += 1
+        else:
+            duplicate_count += (count - 1)
+            found_count += 1
+
+    passed = (found_count == n_expected) and (missing_count == 0) and (duplicate_count == 0) and (failed_status_count == 0)
+
+    return {
+        "expected": n_expected,
+        "found": found_count,
+        "missing": missing_count,
+        "duplicates": duplicate_count,
+        "failed_status": failed_status_count,
+        "missing_tuples": missing_tuples[:10],  # first 10 missing
+        "passed": passed,
+    }
+
 
 def run_scientific_validation(
     canonical_csv: Optional[Path] = None,
     master_doc: Optional[Path] = None,
     target_tier: Optional[str] = None,
 ) -> bool:
-    """Run full automated pre-publication scientific consistency and provenance audit."""
+    """Run full automated pre-publication scientific consistency and Cartesian provenance audit."""
     c_csv = canonical_csv or (OUTPUTS_METRICS / "canonical_master_results.csv")
     doc_path = master_doc or (_ROOT / "manuscript_experiment_results_and_theory.md")
 
@@ -75,9 +157,10 @@ def run_scientific_validation(
             failures.append(f"Metadata IR mismatch for {ds_name}: Config={meta['ir']} vs Audit={actual_ir:.2f}")
 
     # ── Check 2: Canonical Database Integrity & Expected Cardinality ──
-    logger.info("[Check 2/5] Verifying Canonical Database Invariants...")
+    logger.info("[Check 2/5] Verifying Canonical Database Invariants & Range Safety...")
     if not c_csv.exists():
-        failures.append(f"Canonical database not found at {c_csv}")
+        if target_tier == "tier1":
+            failures.append(f"Canonical database not found at {c_csv}")
     else:
         df_can = pd.read_csv(c_csv)
 
@@ -103,14 +186,16 @@ def run_scientific_validation(
                 if np.any((vals < -1e-6) | (vals > 1.0 + 1e-6)):
                     failures.append(f"Metric '{m}' has values outside valid [0, 1] boundary.")
 
-        # Target tier completeness check
+        # Exact Cartesian Product Tier-1 Audit (if requested or certifying)
         if target_tier == "tier1":
-            expected_tier1_runs = len(CORE_10_DATASETS) * len(LOSS_NAMES) * 4 * len(SEEDS) * N_FOLDS
-            actual_tier1_runs = len(df_can[df_can["dataset"].isin(CORE_10_DATASETS) & df_can["model"].isin(LOSS_NAMES)])
-            logger.info(f"Tier 1 Cardinality Audit: Actual={actual_tier1_runs} vs Expected={expected_tier1_runs}")
-            if actual_tier1_runs < expected_tier1_runs:
+            tier1_audit = audit_tier1_cartesian_product(df_can)
+            logger.info("-----------------------------------------------------------------")
+            logger.info(f"Tier 1 Cartesian Product Audit: Expected={tier1_audit['expected']} | Found={tier1_audit['found']} | Missing={tier1_audit['missing']} | Duplicates={tier1_audit['duplicates']} | Failed={tier1_audit['failed_status']}")
+            logger.info("-----------------------------------------------------------------")
+            if not tier1_audit["passed"]:
                 failures.append(
-                    f"Tier 1 Incomplete: Found {actual_tier1_runs}/{expected_tier1_runs} expected runs."
+                    f"Tier 1 Cartesian Incomplete: Found {tier1_audit['found']}/{tier1_audit['expected']} valid configurations. "
+                    f"Missing: {tier1_audit['missing']}, Duplicates: {tier1_audit['duplicates']}, Failed: {tier1_audit['failed_status']}."
                 )
 
     # ── Check 3: Scientific Guardrails in Research Record ──

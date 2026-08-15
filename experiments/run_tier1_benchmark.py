@@ -118,6 +118,16 @@ def run_tier1_benchmark(
         sig_df.to_csv(sig_path, index=False)
         logger.info(f"Saved FDR-corrected statistical analysis to {sig_path}")
 
+        # Automatically consolidate canonical store and generate all paper figures
+        try:
+            from src.analysis.generate_canonical_results import build_canonical_results_store
+            from src.analysis.generate_paper_figures import generate_all_figures
+            build_canonical_results_store()
+            generate_all_figures()
+            logger.info("[FIGURES & TABLES READY] All publication figures and canonical tables generated automatically.")
+        except Exception as e_fig:
+            logger.warning(f"Could not auto-generate figures: {e_fig}")
+
     return res_df
 
 

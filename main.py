@@ -58,6 +58,7 @@ from src.utils.config import (
     MULTICLASS_DATASETS,
     N_FOLDS,
     OPTIMIZER,
+    OUTPUTS_FINAL_MASTER,
     OUTPUTS_LOGS,
     OUTPUTS_METRICS,
     REAL_WORLD_DATASETS,
@@ -66,8 +67,48 @@ from src.utils.config import (
     WEIGHT_DECAY,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("CCR-Orchestrator")
+def setup_master_logging() -> logging.Logger:
+    """Configure simultaneous console and persistent master log file streaming."""
+    master_log_dir = OUTPUTS_FINAL_MASTER / "logs"
+    master_log_dir.mkdir(parents=True, exist_ok=True)
+    master_log_file = master_log_dir / "execution.log"
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    # Console handler
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root_logger.handlers):
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(fmt)
+        root_logger.addHandler(ch)
+
+    # Master file handler
+    has_master_file = any(isinstance(h, logging.FileHandler) and str(master_log_file) in str(getattr(h, "baseFilename", "")) for h in root_logger.handlers)
+    if not has_master_file:
+        fh = logging.FileHandler(master_log_file, mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(fmt)
+        root_logger.addHandler(fh)
+
+    # Fallback log file handler
+    fallback_log_file = OUTPUTS_LOGS / "execution.log"
+    has_fallback_file = any(isinstance(h, logging.FileHandler) and str(fallback_log_file) in str(getattr(h, "baseFilename", "")) for h in root_logger.handlers)
+    if not has_fallback_file:
+        try:
+            fh2 = logging.FileHandler(fallback_log_file, mode="a", encoding="utf-8")
+            fh2.setLevel(logging.INFO)
+            fh2.setFormatter(fmt)
+            root_logger.addHandler(fh2)
+        except Exception:
+            pass
+
+    return logging.getLogger("CCR-Orchestrator")
+
+
+logger = setup_master_logging()
 
 # ── Resource Constraints ───────────────────────────────────────────────────────
 CPU_RESERVED_CORES: int = 3

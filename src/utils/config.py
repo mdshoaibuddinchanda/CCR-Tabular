@@ -87,21 +87,19 @@ MULTICLASS_DATASETS: List[str] = ["segment", "vehicle"]
 REAL_WORLD_DATASETS: List[str] = ["heart_disease", "breast_cancer"]
 NATURAL_NOISE_DATASETS = REAL_WORLD_DATASETS  # Alias for backward compatibility
 
-# ── Loss Matrix (10 Losses) ───────────────────────────────────────────────────
+# ── Loss Matrix (10 Canonical Losses) ─────────────────────────────────────────
 LOSS_NAMES: List[str] = [
-    # Unnormalized
+    # Baseline losses
     "ce",
     "wce",
+    "norm_wce",
     "focal",
+    "norm_focal",
     "gce",
     "sce",
     "elr",
+    # CCR variants
     "ccr_no_norm",
-    # Normalized
-    "norm_wce",
-    "norm_focal",
-    "norm_gce",
-    "norm_sce",
     "ccr",
 ]
 

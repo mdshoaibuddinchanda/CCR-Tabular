@@ -70,8 +70,10 @@ build_canonical_results_store = build_canonical_master_store
 def generate_benchmark_summary_table(
     df: Optional[pd.DataFrame] = None,
     metric: str = "macro_f1",
+    architecture_filter: Optional[str] = None,
+    optimizer_filter: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Generate dataset-by-model summary table with mean +/- std."""
+    """Generate dataset-by-model summary table with mean +/- std, stratified by architecture and optimizer."""
     if df is None:
         if not CANONICAL_MASTER_CSV.exists():
             return pd.DataFrame()
@@ -80,8 +82,20 @@ def generate_benchmark_summary_table(
     if metric not in df.columns or len(df) == 0:
         return pd.DataFrame()
 
+    sub_df = df.copy()
+    if architecture_filter and "architecture" in sub_df.columns:
+        sub_df = sub_df[sub_df["architecture"] == architecture_filter]
+    if optimizer_filter and "optimizer" in sub_df.columns:
+        sub_df = sub_df[sub_df["optimizer"] == optimizer_filter]
+
+    group_cols = ["dataset", "noise_type", "noise_rate", "model"]
+    if "architecture" in sub_df.columns:
+        group_cols.insert(1, "architecture")
+    if "optimizer" in sub_df.columns:
+        group_cols.insert(2, "optimizer")
+
     grouped = (
-        df.groupby(["dataset", "noise_type", "noise_rate", "model"])
+        sub_df.groupby(group_cols)
         .agg(
             mean=(metric, "mean"),
             std=(metric, "std"),
@@ -95,8 +109,9 @@ def generate_benchmark_summary_table(
         axis=1,
     )
 
+    index_cols = [c for c in group_cols if c != "model"]
     pivot = grouped.pivot_table(
-        index=["dataset", "noise_type", "noise_rate"],
+        index=index_cols,
         columns="model",
         values="mean_pm_std",
         aggfunc="first",

@@ -57,11 +57,34 @@ def make_run_id(
     fold: int,
     architecture: str = "mlp",
     optimizer_name: str = "AdamW",
+    lr: float = LEARNING_RATE,
+    weight_decay: float = WEIGHT_DECAY,
+    tau: float = TAU,
+    beta: float = BETA,
+    K_hist: int = K,
+    batch_size: int = BATCH_SIZE,
+    tag: Optional[str] = None,
 ) -> str:
-    """Generate unique run identifier with optimizer disambiguation."""
+    """Generate configuration-complete unique run identifier with deterministic hashing."""
+    import hashlib
     rate_str = f"{int(noise_rate * 100):02d}"
     opt_suffix = f"_{optimizer_name}" if optimizer_name and optimizer_name != "AdamW" else ""
-    return f"{dataset_name}_{model_name}_{architecture}_{noise_type}_{rate_str}{opt_suffix}_seed{seed}_fold{fold}"
+    tag_suffix = f"_{tag}" if tag else ""
+
+    cfg_parts = [
+        f"lr={lr:g}",
+        f"wd={weight_decay:g}",
+        f"tau={tau:g}",
+        f"beta={beta:g}",
+        f"K={K_hist}",
+        f"bs={batch_size}",
+    ]
+    if tag:
+        cfg_parts.append(f"tag={tag}")
+    cfg_raw = ";".join(cfg_parts)
+    cfg_hash = hashlib.sha256(cfg_raw.encode("utf-8")).hexdigest()[:8]
+
+    return f"{dataset_name}_{model_name}_{architecture}_{noise_type}_{rate_str}{opt_suffix}{tag_suffix}_seed{seed}_fold{fold}_c{cfg_hash}"
 
 
 def train_one_fold(
@@ -88,6 +111,7 @@ def train_one_fold(
     batch_size: int = BATCH_SIZE,
     device: Optional[torch.device] = None,
     use_amp: Optional[bool] = None,
+    tag: Optional[str] = None,
 ) -> Tuple[Any, Dict[str, float]]:
     """Train a model on a single fold."""
     fix_all_seeds(seed)
@@ -102,6 +126,13 @@ def train_one_fold(
             fold=fold,
             architecture=architecture,
             optimizer_name=optimizer_name,
+            lr=lr,
+            weight_decay=weight_decay,
+            tau=tau,
+            beta=beta,
+            K_hist=K_hist,
+            batch_size=batch_size,
+            tag=tag,
         )
 
     wall_start = time.perf_counter()
@@ -283,6 +314,9 @@ def _train_neural_model(
             # Backward with gradient scaler
             scaler.scale(loss).backward(retain_graph=instrument_batch)
 
+            # Unscale BEFORE instrumentation (ensures true unscaled physical gradients in p.grad)
+            scaler.unscale_(optimizer)
+
             # Instrument batch before step (autograd graph alive for unweighted grads)
             prev_params = None
             if instrument_batch:
@@ -303,7 +337,6 @@ def _train_neural_model(
                 )
                 prev_params = {name: p.data.clone() for name, p in model.named_parameters()}
 
-            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
             scaler.step(optimizer)
             scaler.update()
@@ -321,8 +354,8 @@ def _train_neural_model(
             epoch_loss += loss.item()
             n_batches += 1
 
-        if hit_nan and epoch == 0:
-            return model, {"macro_f1": 0.0, "status": "FAILED_NAN", "best_epoch": 0}
+        if hit_nan:
+            return model, {"macro_f1": 0.0, "status": "FAILED_NAN", "best_epoch": epoch}
 
         # Validation
         val_metrics = _validate_neural_model(model, X_val, y_val, device)

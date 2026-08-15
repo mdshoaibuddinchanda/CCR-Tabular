@@ -258,7 +258,7 @@ def analyze_dataset_level_significance(
                         "n_runs": min_len,
                         "mean_delta": round(mean_delta, 4),
                         "median_delta": round(median_delta, 4),
-                        "abs_delta": round(mean_delta, 4),
+                        "abs_delta": round(abs(mean_delta), 4),
                         "ci_95_lower": round(ci_lower, 4),
                         "ci_95_upper": round(ci_upper, 4),
                         "cohens_d": round(cohens_d, 3),
@@ -273,17 +273,16 @@ def analyze_dataset_level_significance(
 
     res_df = pd.DataFrame(records)
 
-    # Multiplicity adjustment across all baseline comparisons per noise regime
-    all_adj_p = []
-    all_sig = []
+    # Multiplicity adjustment across all baseline comparisons per noise regime with strict index alignment
+    res_df["fdr_p_value"] = res_df["raw_p_value"]
+    res_df["significant_fdr"] = res_df["raw_p_value"] < alpha
+
     for _, group in res_df.groupby(["noise_type", "noise_rate"]):
         p_vals = group["raw_p_value"].tolist()
         adj_p, sig = benjamini_hochberg_correction(p_vals, alpha=alpha)
-        all_adj_p.extend(adj_p)
-        all_sig.extend(sig)
-
-    res_df["fdr_p_value"] = [round(p, 5) for p in all_adj_p]
-    res_df["significant_fdr"] = all_sig
+        res_df.loc[group.index, "fdr_p_value"] = [round(p, 5) for p in adj_p]
+        res_df.loc[group.index, "p_fdr_wilcoxon"] = [round(p, 5) for p in adj_p]
+        res_df.loc[group.index, "significant_fdr"] = sig
 
     return res_df
 

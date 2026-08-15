@@ -2,7 +2,7 @@
 
 Loads saved models, runs inference on test sets, computes all metrics
 (including calibration metrics ECE and Brier score), and appends results to CSV
-with process-safe locking and explicit run status tracking.
+with process-safe locking, explicit run status tracking, and noise rate transparency.
 """
 
 import logging
@@ -26,8 +26,10 @@ _RESULTS_CSV = OUTPUTS_METRICS / "results.csv"
 
 _RESULTS_COLUMNS = [
     "run_id", "dataset", "model", "architecture", "optimizer", "fold", "seed",
-    "noise_type", "noise_rate", "actual_noise_rate", "status",
-    "accuracy", "macro_f1", "minority_recall", "auc_roc", "auc_pr",
+    "noise_type", "noise_rate", "actual_noise_rate",
+    "target_conditional_noise_rate", "actual_conditional_noise_rate",
+    "target_overall_noise_rate", "actual_overall_noise_rate",
+    "status", "accuracy", "macro_f1", "minority_recall", "auc_roc", "auc_pr",
     "ece", "brier_score",
     "train_time_s", "peak_vram_mb", "n_epochs",
     "timestamp",
@@ -69,6 +71,10 @@ def evaluate_model(
         "noise_type": metadata.get("noise_type", "none"),
         "noise_rate": metadata.get("noise_rate", 0.0),
         "actual_noise_rate": metadata.get("actual_noise_rate", metadata.get("noise_rate", 0.0)),
+        "target_conditional_noise_rate": metadata.get("target_conditional_noise_rate", metadata.get("noise_rate", 0.0)),
+        "actual_conditional_noise_rate": metadata.get("actual_conditional_noise_rate", metadata.get("actual_noise_rate", 0.0)),
+        "target_overall_noise_rate": metadata.get("target_overall_noise_rate", metadata.get("noise_rate", 0.0)),
+        "actual_overall_noise_rate": metadata.get("actual_overall_noise_rate", metadata.get("actual_noise_rate", 0.0)),
         "status": metadata.get("status", "SUCCESS"),
         "accuracy": metrics["accuracy"],
         "macro_f1": metrics["macro_f1"],
@@ -88,27 +94,35 @@ def evaluate_model(
 
 
 def append_results(results_row: Dict, results_path: Path) -> None:
-    """Append one row to results CSV with process-safe file locking and deduplication."""
+    """Append one row to results CSV with process-safe file locking, timeout enforcement, and deduplication."""
     results_path = Path(results_path)
     results_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = results_path.with_suffix(".lock")
 
     df_new = pd.DataFrame([results_row])
 
-    # Simple cross-platform spin-lock with exponential backoff
+    # Spin-lock with stale lock detection (30s) and timeout enforcement
     lock_acquired = False
-    max_wait = 15.0
+    max_wait = 20.0
     start_wait = time.time()
 
     while time.time() - start_wait < max_wait:
         try:
-            # Atomic creation of lock file
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             lock_acquired = True
             break
         except FileExistsError:
+            # Check for stale lock file older than 30s
+            try:
+                if lock_path.exists() and (time.time() - lock_path.stat().st_mtime > 30.0):
+                    lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
             time.sleep(0.05)
+
+    if not lock_acquired:
+        raise TimeoutError(f"Could not acquire process-safe write lock on '{lock_path}' after {max_wait}s.")
 
     try:
         if results_path.exists() and results_path.stat().st_size > 0:

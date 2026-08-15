@@ -18,12 +18,18 @@ from src.data.preprocess import preprocess_split
 from src.training.evaluate import evaluate_model
 from src.training.train import make_run_id, train_one_fold
 from src.utils.config import (
+    BATCH_SIZE,
+    BETA,
     DATASETS,
+    K,
+    LEARNING_RATE,
     N_FOLDS,
     OPTIMIZER,
     OUTPUTS_METRICS,
     SEEDS,
+    TAU,
     VAL_SIZE,
+    WEIGHT_DECAY,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,10 +110,9 @@ def _is_already_completed(run_id: str, results_path: Path) -> bool:
         if "run_id" in df_existing.columns:
             matched = df_existing[df_existing["run_id"] == run_id]
             if len(matched) > 0:
-                # Ensure it has valid non-NaN metric
+                if "status" in matched.columns:
+                    return matched["status"].iloc[0] in ("SUCCESS", "SUCCESS_CPU_FALLBACK")
                 if "macro_f1" in matched.columns and pd.notna(matched["macro_f1"].iloc[0]):
-                    if "status" in matched.columns:
-                        return matched["status"].iloc[0] in ("SUCCESS", "SUCCESS_CPU_FALLBACK")
                     return True
     except Exception:
         pass
@@ -121,11 +126,17 @@ def run_cross_validation(
     noise_rate: float = 0.0,
     architecture: str = "mlp",
     optimizer_name: str = OPTIMIZER,
+    lr: float = LEARNING_RATE,
+    weight_decay: float = WEIGHT_DECAY,
+    tau: float = TAU,
+    beta: float = BETA,
+    K_hist: int = K,
+    tag: Optional[str] = None,
     seeds: Optional[List[int]] = None,
     n_folds: int = N_FOLDS,
     instrument_batch: bool = False,
     results_path: Optional[Path] = None,
-    batch_size: int = 128,
+    batch_size: int = BATCH_SIZE,
     device: Optional[Any] = None,
     use_amp: Optional[bool] = None,
 ) -> pd.DataFrame:
@@ -160,6 +171,13 @@ def run_cross_validation(
                 fold=fold,
                 architecture=architecture,
                 optimizer_name=optimizer_name,
+                lr=lr,
+                weight_decay=weight_decay,
+                tau=tau,
+                beta=beta,
+                K_hist=K_hist,
+                batch_size=batch_size,
+                tag=tag,
             )
 
             # Check if run exists (idempotent resume)
@@ -197,12 +215,18 @@ def run_cross_validation(
                 noise_rate=noise_rate,
                 architecture=architecture,
                 optimizer_name=optimizer_name,
+                lr=lr,
+                weight_decay=weight_decay,
+                tau=tau,
+                beta=beta,
+                K_hist=K_hist,
                 instrument_batch=instrument_batch,
                 run_id=run_id,
                 clean_y_train=y_tr_clean,
                 batch_size=batch_size,
                 device=device,
                 use_amp=use_amp,
+                tag=tag,
             )
 
             # Evaluate on untouched test fold
@@ -222,6 +246,10 @@ def run_cross_validation(
                     "noise_type": noise_type,
                     "noise_rate": noise_rate,
                     "actual_noise_rate": actual_rate,
+                    "target_conditional_noise_rate": noise_stats.get("target_conditional_noise_rate", noise_rate),
+                    "actual_conditional_noise_rate": noise_stats.get("actual_conditional_noise_rate", actual_rate),
+                    "target_overall_noise_rate": noise_stats.get("target_overall_noise_rate", noise_rate),
+                    "actual_overall_noise_rate": noise_stats.get("actual_overall_noise_rate", actual_rate),
                     "status": val_metrics.get("status", "SUCCESS"),
                     "train_time_s": val_metrics.get("train_time_s", 0.0),
                     "peak_vram_mb": val_metrics.get("peak_vram_mb", 0.0),

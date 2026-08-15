@@ -48,15 +48,20 @@ import torch
 
 from src.utils.config import (
     BATCH_SIZE,
+    BETA,
     CORE_10_DATASETS,
     DATASETS,
+    K,
     LEARNING_RATE,
+    LOSS_NAMES,
     MULTICLASS_DATASETS,
     N_FOLDS,
     OPTIMIZER,
+    OUTPUTS_LOGS,
     OUTPUTS_METRICS,
     REAL_WORLD_DATASETS,
     SEEDS,
+    TAU,
     WEIGHT_DECAY,
 )
 
@@ -91,6 +96,13 @@ class JobDescriptor:
     noise_rate: float = 0.0
     architecture: str = "mlp"
     optimizer: str = OPTIMIZER
+    lr: float = LEARNING_RATE
+    weight_decay: float = WEIGHT_DECAY
+    tau: float = TAU
+    beta: float = BETA
+    K_hist: int = K
+    batch_size: int = BATCH_SIZE
+    tag: Optional[str] = None
     seeds: Optional[List[int]] = None
     n_folds: int = N_FOLDS
     instrument_batch: bool = False
@@ -104,7 +116,7 @@ class JobDescriptor:
 
 # ── Standalone Worker Function for Multiprocessing ─────────────────────────────
 
-def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch_size: int = 128, use_amp: bool = False) -> Dict[str, Any]:
+def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch_size: int = BATCH_SIZE, use_amp: bool = False) -> Dict[str, Any]:
     """Execute a single cross-validation job in a worker process."""
     from src.training.cross_validation import run_cross_validation
 
@@ -119,6 +131,12 @@ def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch
         noise_rate=job_dict["noise_rate"],
         architecture=job_dict["architecture"],
         optimizer_name=job_dict["optimizer"],
+        lr=job_dict.get("lr", LEARNING_RATE),
+        weight_decay=job_dict.get("weight_decay", WEIGHT_DECAY),
+        tau=job_dict.get("tau", TAU),
+        beta=job_dict.get("beta", BETA),
+        K_hist=job_dict.get("K_hist", K),
+        tag=job_dict.get("tag", None),
         seeds=job_dict["seeds"] or SEEDS,
         n_folds=job_dict["n_folds"],
         instrument_batch=job_dict["instrument_batch"],
@@ -290,6 +308,14 @@ class HeterogeneousJobScheduler:
                         seed=s,
                         fold=f,
                         architecture=job.architecture,
+                        optimizer_name=job.optimizer,
+                        lr=job.lr,
+                        weight_decay=job.weight_decay,
+                        tau=job.tau,
+                        beta=job.beta,
+                        K_hist=job.K_hist,
+                        batch_size=job.batch_size,
+                        tag=job.tag,
                     )
                     if rid not in existing_runs:
                         return False
@@ -323,7 +349,7 @@ class HeterogeneousJobScheduler:
         use_amp = self.gpu_prof["amp_enabled"]
 
         cache_key = (arch, model_name, dataset, "float32", device_str)
-        batch_size = _BATCH_SIZE_CACHE.get(cache_key, BATCH_SIZE)
+        batch_size = _BATCH_SIZE_CACHE.get(cache_key, job.batch_size)
 
         res_path = Path(job.results_path) if job.results_path else None
         retries = 0
@@ -342,6 +368,12 @@ class HeterogeneousJobScheduler:
                     noise_rate=job.noise_rate,
                     architecture=arch,
                     optimizer_name=job.optimizer,
+                    lr=job.lr,
+                    weight_decay=job.weight_decay,
+                    tau=job.tau,
+                    beta=job.beta,
+                    K_hist=job.K_hist,
+                    tag=job.tag,
                     seeds=job.seeds or SEEDS,
                     n_folds=job.n_folds,
                     instrument_batch=job.instrument_batch and not self.fast_mode,
@@ -353,51 +385,51 @@ class HeterogeneousJobScheduler:
                 elapsed = time.perf_counter() - t0
 
                 _BATCH_SIZE_CACHE[cache_key] = batch_size
-                if device_str == "cuda":
-                    self.stats["gpu_runs"] += 1
-                else:
-                    self.stats["cpu_runs"] += 1
+                self.stats["gpu_runs"] += 1
                 self.stats["completed"] += 1
 
                 return {
                     "status": "SUCCESS",
                     "dataset": dataset,
                     "model": model_name,
-                    "device": device_str,
+                    "noise_type": job.noise_type,
+                    "noise_rate": job.noise_rate,
+                    "n_rows": len(df) if df is not None else 0,
                     "elapsed_s": elapsed,
-                    "rows": len(df) if df is not None else 0,
+                    "device": device_str,
+                    "batch_size": batch_size,
                 }
 
-            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-                is_oom = ("out of memory" in str(e).lower()) or isinstance(e, torch.cuda.OutOfMemoryError)
-                if is_oom and device_str == "cuda":
-                    retries += 1
-                    self.stats["oom_recovered"] += 1
-                    new_batch = max(16, batch_size // 2)
+            except torch.cuda.OutOfMemoryError as e:
+                retries += 1
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+                if batch_size > MIN_BATCH_SIZE:
+                    prev_bs = batch_size
+                    batch_size = max(MIN_BATCH_SIZE, batch_size // 2)
                     logger.warning(
-                        f"[OOM RECOVERY] [{dataset}-{model_name}-{arch}] GPU OOM (Attempt {retries}/{MAX_OOM_RETRIES}). "
-                        f"Scaling batch size: {batch_size} -> {new_batch}."
+                        f"[GPU OOM] Job {dataset}/{model_name} on {device_str}. "
+                        f"Reducing micro-batch {prev_bs} -> {batch_size}. Retry {retries}/{MAX_OOM_RETRIES}."
                     )
-                    batch_size = new_batch
                     _BATCH_SIZE_CACHE[cache_key] = batch_size
-
-                    if torch.cuda.is_available():
-                        gc.collect()
-                        torch.cuda.empty_cache()
-
-                    if retries > MAX_OOM_RETRIES:
-                        logger.warning(f"[CPU FALLBACK] Max GPU OOM retries exceeded on {dataset}-{model_name}. Rerunning cleanly on CPU.")
-                        self.stats["cpu_fallback_runs"] += 1
-                        break
+                    self.stats["oom_recovered"] += 1
                 else:
-                    logger.error(f"Job execution failed on {dataset}-{model_name}: {e}")
-                    self.stats["failed"] += 1
-                    return {"status": "FAILED", "dataset": dataset, "model": model_name, "error": str(e)}
+                    logger.warning(
+                        f"[GPU OOM EXHAUSTED] Job {dataset}/{model_name} cannot run at min batch {MIN_BATCH_SIZE}. "
+                        f"Falling back to CPU execution."
+                    )
+                    break
+            except Exception as e:
+                logger.error(f"Job execution failed on {dataset}-{model_name}: {e}")
+                self.stats["failed"] += 1
+                return {"status": "FAILED", "dataset": dataset, "model": model_name, "error": str(e)}
 
-        # Clean explicit CPU fallback after GPU retries exhausted
+        # Fallback to CPU execution
+        logger.info(f"[CPU FALLBACK] Executing {dataset}-{model_name} on CPU...")
+        t0 = time.perf_counter()
         try:
-            logger.info(f"Executing clean CPU fallback for [{dataset}-{model_name}-{arch}]...")
-            t0 = time.perf_counter()
             df = run_cross_validation(
                 dataset_name=dataset,
                 model_name=model_name,
@@ -405,6 +437,12 @@ class HeterogeneousJobScheduler:
                 noise_rate=job.noise_rate,
                 architecture=arch,
                 optimizer_name=job.optimizer,
+                lr=job.lr,
+                weight_decay=job.weight_decay,
+                tau=job.tau,
+                beta=job.beta,
+                K_hist=job.K_hist,
+                tag=job.tag,
                 seeds=job.seeds or SEEDS,
                 n_folds=job.n_folds,
                 instrument_batch=job.instrument_batch and not self.fast_mode,
@@ -532,11 +570,18 @@ def run_dry_run_planner(target_tiers: List[str], device_mode: str = "auto") -> N
 
     for tier in target_tiers:
         if tier == "tier1":
+            n_ds = len(CORE_10_DATASETS)
+            n_losses = len(LOSS_NAMES)
+            n_noise = 4
+            n_seeds = len(SEEDS)
+            n_folds = N_FOLDS
+            total_runs = n_ds * n_losses * n_noise * n_seeds * n_folds
             print("Tier 1: Core 10-Dataset Master Benchmark")
-            print("  Datasets (10):", CORE_10_DATASETS)
-            print("  Losses (8):    ['ce', 'wce', 'focal', 'gce', 'sce', 'elr', 'ccr_no_norm', 'ccr']")
+            print(f"  Datasets ({n_ds}):", CORE_10_DATASETS)
+            print(f"  Losses ({n_losses}):  ", LOSS_NAMES)
             print("  Noise (4):     Clean (0%), 20% Asym, 40% Asym, 20% Sym")
-            print("  Folds/Seeds:   3 Folds x 2 Seeds = 6 runs/condition")
+            print(f"  Folds/Seeds:   {n_folds} Folds x {n_seeds} Seeds = {n_folds * n_seeds} runs/condition")
+            print(f"  Total Expected Runs: {total_runs} fold-level executions")
             print("  Routing:       GPU-First Queue (1 Dedicated GPU Slot, FP16 AMP)")
         elif tier == "tier3":
             print("\nTier 3: Architecture Transferability Benchmark")
@@ -545,10 +590,10 @@ def run_dry_run_planner(target_tiers: List[str], device_mode: str = "auto") -> N
             print("  Routing:       GPU-First Queue (FP16 AMP)")
         elif tier == "tier4":
             print("\nTier 4: Multiclass Transfer Benchmark (C >= 3)")
-            print("  Datasets (2):  ['segment' (C=7), 'vehicle' (C=4)]")
+            print(f"  Datasets ({len(MULTICLASS_DATASETS)}):  ['segment' (C=7), 'vehicle' (C=4)]")
         elif tier == "tier5":
             print("\nTier 5: Real-World Clinical External Validation")
-            print("  Datasets (2):  ['heart_disease', 'breast_cancer']")
+            print(f"  Datasets ({len(REAL_WORLD_DATASETS)}):  ['heart_disease', 'breast_cancer']")
     print("=================================================================\n")
 
 

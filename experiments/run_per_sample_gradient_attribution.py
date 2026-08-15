@@ -149,21 +149,21 @@ def run_gradient_attribution_study(
                             w_sum = np.sum(weights) + 1e-8
                             weights = (weights / w_sum) * b_size
 
-                        # Compute per-sample gradient norm: ||g_i||_2 for the last linear layer
-                        # (Representative gradient proxy without O(N*P) full autograd overhead)
-                        sample_grad_norms = np.zeros(b_size, dtype=np.float32)
-                        last_layer = None
-                        for layer in reversed(model.network):
-                            if isinstance(layer, nn.Linear):
-                                last_layer = layer
-                                break
-
-                        # Analytical per-sample gradient for cross entropy: g_i = (p_i - e_y) (x_hidden)
+                        # Compute exact parameter gradient norm for the classification head:
+                        # ||nabla_W ell_i||_F = ||p_i - e_{y_i}||_2 * ||h_i||_2 (Frobenius norm)
                         with torch.no_grad():
+                            # Forward through all layers except the final linear classifier
+                            h_feat = X_b
+                            for layer in list(model.network.children())[:-1]:
+                                h_feat = layer(h_feat)
+                            h_norms = torch.norm(h_feat, p=2, dim=1).cpu().numpy()  # [B]
+
                             y_one_hot = F.one_hot(y_b, num_classes=num_classes).float()
                             logit_errors = (probs - y_one_hot).cpu().numpy()  # [B, C]
-                            # Gradient norm w.r.t logits: ||p_i - e_y||_2
-                            sample_grad_norms = np.linalg.norm(logit_errors, axis=1)
+                            logit_grad_norms = np.linalg.norm(logit_errors, axis=1)  # [B]
+                            
+                            # Exact per-sample gradient norm w.r.t classification head parameters W
+                            sample_grad_norms = logit_grad_norms * (h_norms + 1e-8)
 
                         weighted_grads = weights * sample_grad_norms
                         total_weighted_grad = np.sum(weighted_grads) + 1e-8
@@ -188,7 +188,7 @@ def run_gradient_attribution_study(
                                     "contribution": float(contributions[i]),
                                 })
 
-                        # Overall batch summary
+                        # Overall batch summary (relative gradient-norm contribution proxy)
                         g_corrupt = np.sum(contributions[is_corrupt_batch]) if np.any(is_corrupt_batch) else 0.0
                         g_clean = np.sum(contributions[~is_corrupt_batch]) if np.any(~is_corrupt_batch) else 0.0
                         r_noise = g_corrupt / (g_clean + g_corrupt + 1e-8)
@@ -217,7 +217,7 @@ def run_gradient_attribution_study(
 
                         if hasattr(criterion, "update_history"):
                             with torch.no_grad():
-                                criterion.update_history(probs, idx_b, epoch)
+                                criterion.update_history(probs, idx_b, epoch, targets=y_b)
 
     df_samples = pd.DataFrame(all_sample_records)
     df_summary = pd.DataFrame(summary_records)

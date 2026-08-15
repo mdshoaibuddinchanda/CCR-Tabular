@@ -1,7 +1,8 @@
 """Label noise injection engine for CCR-Tabular experiments.
 
 Implements standalone, fold-local noise generation for all requested noise regimes:
-  1. Asymmetric Noise: Minority (1) -> Majority (0) flips.
+  1. Asymmetric Noise: Minority (1) -> Majority (0) conditional flips.
+     Reports both conditional minority flip rate and overall dataset corruption rate.
   2. Symmetric Noise: Uniform random class flips.
   3. Feature-Correlated Noise: Fold-local boundary ranking via margin M(x) = |P(y=1) - P(y=0)|.
      Candidates chosen from lowest 40% margin with exact corruption count floor(eps * N_train).
@@ -51,6 +52,7 @@ def inject_asymmetric_noise(
         raise ValueError(f"y_train must contain both class 0 and 1. Got: {unique_vals}.")
 
     y_noisy = y_train.copy()
+    n_total = len(y_train)
     minority_indices = np.where(y_train == 1)[0]
     n_minority_before = len(minority_indices)
 
@@ -60,6 +62,10 @@ def inject_asymmetric_noise(
             "n_flipped": 0,
             "n_minority_before": n_minority_before,
             "n_minority_after": n_minority_before,
+            "target_conditional_noise_rate": 0.0,
+            "actual_conditional_noise_rate": 0.0,
+            "target_overall_noise_rate": 0.0,
+            "actual_overall_noise_rate": 0.0,
             "actual_noise_rate": 0.0,
         }
 
@@ -70,7 +76,9 @@ def inject_asymmetric_noise(
         y_noisy[flip_indices] = 0
 
     n_minority_after = int(np.sum(y_noisy == 1))
-    actual_rate = n_to_flip / n_minority_before if n_minority_before > 0 else 0.0
+    actual_cond_rate = n_to_flip / n_minority_before if n_minority_before > 0 else 0.0
+    actual_overall_rate = n_to_flip / n_total if n_total > 0 else 0.0
+    target_overall_rate = (noise_rate * n_minority_before) / n_total if n_total > 0 else 0.0
 
     # Assertion: majority labels must never be modified
     assert np.sum(y_noisy[y_train == 0] != y_train[y_train == 0]) == 0, (
@@ -82,7 +90,11 @@ def inject_asymmetric_noise(
         "n_flipped": n_to_flip,
         "n_minority_before": n_minority_before,
         "n_minority_after": n_minority_after,
-        "actual_noise_rate": actual_rate,
+        "target_conditional_noise_rate": noise_rate,
+        "actual_conditional_noise_rate": actual_cond_rate,
+        "target_overall_noise_rate": target_overall_rate,
+        "actual_overall_noise_rate": actual_overall_rate,
+        "actual_noise_rate": actual_cond_rate,  # Backward compatible
     }
     return y_noisy, stats
 
@@ -109,6 +121,10 @@ def inject_symmetric_noise(
         return y_noisy, {
             "noise_type": "sym",
             "n_flipped": 0,
+            "target_conditional_noise_rate": 0.0,
+            "actual_conditional_noise_rate": 0.0,
+            "target_overall_noise_rate": 0.0,
+            "actual_overall_noise_rate": 0.0,
             "actual_noise_rate": 0.0,
         }
 
@@ -119,12 +135,19 @@ def inject_symmetric_noise(
     for idx in flip_indices:
         curr_label = y_noisy[idx]
         other_classes = [c for c in range(n_classes) if c != curr_label]
-        y_noisy[idx] = rng.choice(other_classes)
+        if other_classes:
+            y_noisy[idx] = rng.choice(other_classes)
+        else:
+            y_noisy[idx] = 1 - curr_label
 
-    actual_rate = n_to_flip / n_total
+    actual_rate = n_to_flip / n_total if n_total > 0 else 0.0
     stats = {
         "noise_type": "sym",
         "n_flipped": n_to_flip,
+        "target_conditional_noise_rate": noise_rate,
+        "actual_conditional_noise_rate": actual_rate,
+        "target_overall_noise_rate": noise_rate,
+        "actual_overall_noise_rate": actual_rate,
         "actual_noise_rate": actual_rate,
     }
     return y_noisy, stats
@@ -135,11 +158,11 @@ def inject_feature_correlated_noise(
     y_train: np.ndarray,
     noise_rate: float,
     seed: int,
-    reference_model: Optional[Any] = None,
     candidate_fraction: float = 0.40,
+    reference_model: Optional[Any] = None,
     model_confidences: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Flip labels of boundary samples identified via fold-local reference model confidence margin."""
+    """Inject feature-correlated noise by corrupting boundary-adjacent samples."""
     if len(y_train) > _MAX_SAFE_TRAIN_SIZE:
         raise ValueError(
             f"y_train has {len(y_train)} samples. Pass only the training fold. "
@@ -156,6 +179,10 @@ def inject_feature_correlated_noise(
             "noise_type": "feat",
             "n_flipped": 0,
             "n_candidates": 0,
+            "target_conditional_noise_rate": 0.0,
+            "actual_conditional_noise_rate": 0.0,
+            "target_overall_noise_rate": 0.0,
+            "actual_overall_noise_rate": 0.0,
             "actual_noise_rate": 0.0,
         }
 
@@ -185,10 +212,15 @@ def inject_feature_correlated_noise(
         candidate_indices = sorted_indices[:n_candidates]
 
     if len(candidate_indices) == 0:
-        return y_noisy, {"noise_type": "feat", "n_flipped": 0, "n_candidates": 0, "actual_noise_rate": 0.0}
+        return y_noisy, {
+            "noise_type": "feat", "n_flipped": 0, "n_candidates": 0,
+            "target_conditional_noise_rate": 0.0, "actual_conditional_noise_rate": 0.0,
+            "target_overall_noise_rate": 0.0, "actual_overall_noise_rate": 0.0,
+            "actual_noise_rate": 0.0
+        }
 
     n_to_flip = min(int(np.floor(noise_rate * n_total)), len(candidate_indices))
-    if n_to_flip == 0:
+    if n_to_flip == 0 and noise_rate > 0.0:
         n_to_flip = min(1, len(candidate_indices))
 
     flip_indices = rng.choice(candidate_indices, size=n_to_flip, replace=False)
@@ -207,6 +239,10 @@ def inject_feature_correlated_noise(
         "noise_type": "feat",
         "n_flipped": n_to_flip,
         "n_candidates": len(candidate_indices),
+        "target_conditional_noise_rate": noise_rate,
+        "actual_conditional_noise_rate": actual_rate,
+        "target_overall_noise_rate": noise_rate,
+        "actual_overall_noise_rate": actual_rate,
         "actual_noise_rate": actual_rate,
     }
     return y_noisy, stats
@@ -235,6 +271,10 @@ def inject_instance_dependent_noise(
         return y_noisy, {
             "noise_type": "idn",
             "n_flipped": 0,
+            "target_conditional_noise_rate": 0.0,
+            "actual_conditional_noise_rate": 0.0,
+            "target_overall_noise_rate": 0.0,
+            "actual_overall_noise_rate": 0.0,
             "actual_noise_rate": 0.0,
         }
 
@@ -255,7 +295,10 @@ def inject_instance_dependent_noise(
     for idx in flip_indices:
         curr_label = y_noisy[idx]
         other_classes = [c for c in range(n_classes) if c != curr_label]
-        y_noisy[idx] = rng.choice(other_classes)
+        if other_classes:
+            y_noisy[idx] = rng.choice(other_classes)
+        else:
+            y_noisy[idx] = 1 - curr_label
 
     n_to_flip = len(flip_indices)
     actual_rate = n_to_flip / n_total if n_total > 0 else 0.0
@@ -263,6 +306,10 @@ def inject_instance_dependent_noise(
     stats = {
         "noise_type": "idn",
         "n_flipped": n_to_flip,
+        "target_conditional_noise_rate": noise_rate,
+        "actual_conditional_noise_rate": actual_rate,
+        "target_overall_noise_rate": noise_rate,
+        "actual_overall_noise_rate": actual_rate,
         "actual_noise_rate": actual_rate,
     }
     return y_noisy, stats
@@ -279,7 +326,15 @@ def generate_noise(
     """Master noise generator routing to specific noise models."""
     noise_type = noise_type.lower().strip()
     if noise_type in ("none", "clean") or noise_rate == 0.0:
-        return y_train.copy(), {"noise_type": "none", "n_flipped": 0, "actual_noise_rate": 0.0}
+        return y_train.copy(), {
+            "noise_type": "none",
+            "n_flipped": 0,
+            "target_conditional_noise_rate": 0.0,
+            "actual_conditional_noise_rate": 0.0,
+            "target_overall_noise_rate": 0.0,
+            "actual_overall_noise_rate": 0.0,
+            "actual_noise_rate": 0.0,
+        }
 
     if noise_type in ("asym", "asymmetric"):
         return inject_asymmetric_noise(y_train, noise_rate, seed)

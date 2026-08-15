@@ -285,6 +285,7 @@ class XGBoostBaseline(BaselineModel):
         kwargs = {
             "random_state": self.seed,
             "verbosity": 0,
+            "n_jobs": 1,
         }
         n_classes = len(np.unique(y_train))
         if n_classes == 2 and self.weighted:
@@ -315,7 +316,7 @@ class XGBoostBaseline(BaselineModel):
 
 
 class LightGBMBaseline(BaselineModel):
-    """LightGBM baseline."""
+    """LightGBM baseline with single-thread process isolation."""
 
     def __init__(self, seed: int = 42) -> None:
         self.seed = seed
@@ -332,7 +333,7 @@ class LightGBMBaseline(BaselineModel):
         import pandas as pd
 
         callbacks = [lgb.log_evaluation(period=-1)]
-        self.model = lgb.LGBMClassifier(random_state=self.seed, verbose=-1)
+        self.model = lgb.LGBMClassifier(random_state=self.seed, n_jobs=1, verbose=-1)
         X_train_df = pd.DataFrame(X_train)
         X_val_df = pd.DataFrame(X_val) if X_val is not None else None
         eval_set_df = [(X_val_df, y_val)] if X_val_df is not None else None
@@ -347,7 +348,7 @@ class LightGBMBaseline(BaselineModel):
         return self.model.predict_proba(pd.DataFrame(X))
 
 class CatBoostBaseline(BaselineModel):
-    """CatBoost gradient boosting baseline."""
+    """CatBoost gradient boosting baseline with single-thread process isolation."""
 
     def __init__(self, seed: int = 42) -> None:
         self.seed = seed
@@ -364,6 +365,7 @@ class CatBoostBaseline(BaselineModel):
         eval_set = (X_val, y_val) if X_val is not None and y_val is not None else None
         self.model = CatBoostClassifier(
             random_seed=self.seed,
+            thread_count=1,
             verbose=False,
             early_stopping_rounds=20 if eval_set is not None else None,
         )

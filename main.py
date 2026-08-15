@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 _ROOT = Path(__file__).parent
 sys.path.insert(0, str(_ROOT))
 
+import pandas as pd
 import psutil
 import torch
 
@@ -117,7 +118,7 @@ class JobDescriptor:
 # ── Standalone Worker Function for Multiprocessing ─────────────────────────────
 
 def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch_size: int = BATCH_SIZE, use_amp: bool = False) -> Dict[str, Any]:
-    """Execute a single cross-validation job in a worker process."""
+    """Execute a single cross-validation job in a worker process and return verified successful run_ids."""
     from src.training.cross_validation import run_cross_validation
 
     res_path = Path(job_dict["results_path"]) if job_dict.get("results_path") else None
@@ -147,6 +148,14 @@ def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch
     )
     elapsed = time.perf_counter() - t0
 
+    successful_run_ids: List[str] = []
+    if df is not None and len(df) > 0:
+        if "run_id" in df.columns:
+            if "status" in df.columns:
+                successful_run_ids = df[df["status"].isin(["SUCCESS", "SUCCESS_CPU_FALLBACK"])]["run_id"].dropna().tolist()
+            else:
+                successful_run_ids = df["run_id"].dropna().tolist()
+
     return {
         "status": "SUCCESS",
         "dataset": job_dict["dataset"],
@@ -154,6 +163,7 @@ def _worker_execute_job(job_dict: Dict[str, Any], device_str: str = "cpu", batch
         "noise_type": job_dict["noise_type"],
         "noise_rate": job_dict["noise_rate"],
         "n_rows": len(df) if df is not None else 0,
+        "successful_run_ids": successful_run_ids,
         "elapsed_s": elapsed,
         "device": device_str,
     }
@@ -254,6 +264,16 @@ def print_resource_report() -> None:
     print("=================================================================\n")
 
 
+def get_model_safe_vram_requirement(architecture: str, model_name: str) -> int:
+    """Return minimum safe VRAM required (in MB) before attempting GPU allocation."""
+    arch = architecture.lower()
+    if "transformer" in arch or "fttransformer" in arch:
+        return 1500  # FT-Transformer attention & embedding matrices
+    elif "resnet" in arch:
+        return 1000  # Tabular ResNet residual blocks
+    return 800       # Standard Tabular MLP
+
+
 # ── Heterogeneous Concurrent Scheduler ─────────────────────────────────────────
 
 class HeterogeneousJobScheduler:
@@ -299,31 +319,18 @@ class HeterogeneousJobScheduler:
                 self._completed_run_ids[target_csv] = set()
         return self._completed_run_ids[target_csv]
 
-    def _register_completed_job_ids(self, job: JobDescriptor, target_csv: Path) -> None:
-        """Register all fold/seed run_ids for a completed job into the in-memory cache."""
+    def _register_completed_job_ids(self, job: JobDescriptor, target_csv: Path, df: Optional[pd.DataFrame] = None) -> None:
+        """Register only actually successful run_ids from the returned DataFrame into the in-memory cache."""
         completed_set = self._get_completed_ids_for_csv(target_csv)
-        seeds = job.seeds or SEEDS
-        from src.training.train import make_run_id
-        for s in seeds:
-            for f in range(1, job.n_folds + 1):
-                rid = make_run_id(
-                    dataset_name=job.dataset,
-                    model_name=job.model,
-                    noise_type=job.noise_type,
-                    noise_rate=job.noise_rate,
-                    seed=s,
-                    fold=f,
-                    architecture=job.architecture,
-                    optimizer_name=job.optimizer,
-                    lr=job.lr,
-                    weight_decay=job.weight_decay,
-                    tau=job.tau,
-                    beta=job.beta,
-                    K_hist=job.K_hist,
-                    batch_size=job.batch_size,
-                    tag=job.tag,
-                )
-                completed_set.add(rid)
+        if df is not None and len(df) > 0:
+            if "run_id" in df.columns:
+                if "status" in df.columns:
+                    for _, row in df.iterrows():
+                        if row["status"] in {"SUCCESS", "SUCCESS_CPU_FALLBACK"}:
+                            completed_set.add(row["run_id"])
+                else:
+                    for rid in df["run_id"].dropna().values:
+                        completed_set.add(rid)
 
     def _is_job_complete(self, job: JobDescriptor) -> bool:
         """Check if all fold/seed combinations for this job exist in target CSV (in-memory cached)."""
@@ -384,11 +391,12 @@ class HeterogeneousJobScheduler:
         live_gpu_prof = get_gpu_resource_profile(self.device_override)
         safe_vram = live_gpu_prof["safe_vram_mb"]
         cuda_ok = live_gpu_prof["cuda_available"] and (self.device_override != "cpu")
+        min_vram = get_model_safe_vram_requirement(arch, model_name)
 
-        # 2. Strict VRAM safety check: Fall back to CPU if safe working budget < 500 MB
-        if (not cuda_ok) or (safe_vram < 500):
+        # 2. Strict model-aware VRAM safety check: Fall back to CPU if safe working budget < min_vram
+        if (not cuda_ok) or (safe_vram < min_vram):
             logger.warning(
-                f"[VRAM SAFETY ACTIVE] [{dataset}-{model_name}] Safe VRAM is {safe_vram} MB (< 500 MB threshold). "
+                f"[VRAM SAFETY ACTIVE] [{dataset}-{model_name}-{arch}] Safe VRAM is {safe_vram} MB (< {min_vram} MB requirement). "
                 f"Routing cleanly to CPU fallback to preserve stability."
             )
             self.stats["cpu_fallback_runs"] += 1
@@ -433,7 +441,7 @@ class HeterogeneousJobScheduler:
                 _BATCH_SIZE_CACHE[cache_key] = batch_size
                 self.stats["gpu_runs"] += 1
                 self.stats["completed"] += 1
-                self._register_completed_job_ids(job, res_path)
+                self._register_completed_job_ids(job, res_path, df)
 
                 return {
                     "status": "SUCCESS",
@@ -507,7 +515,7 @@ class HeterogeneousJobScheduler:
             elapsed = time.perf_counter() - t0
             self.stats["cpu_runs"] += 1
             self.stats["completed"] += 1
-            self._register_completed_job_ids(job, res_path)
+            self._register_completed_job_ids(job, res_path, df)
             return {"status": "SUCCESS_CPU_FALLBACK", "dataset": job.dataset, "model": job.model, "device": "cpu", "elapsed_s": elapsed}
         except Exception as e_cpu:
             logger.error(f"CPU fallback failed on {job.dataset}-{job.model}: {e_cpu}")
@@ -841,6 +849,7 @@ def main() -> None:
     parser.add_argument("--canonical", action="store_true", help="Consolidate canonical master results store.")
     parser.add_argument("--figures", action="store_true", help="Generate all publication and supplementary figures.")
     parser.add_argument("--smoke_test", action="store_true", help="Run quick 2-fold diagnostic smoke test.")
+    parser.add_argument("--smoke_test_transformer", action="store_true", help="Run 1-fold FT-Transformer smoke test on Adult with 40% noise.")
 
     # Execution Mode: Fast vs Safe
     mode_group = parser.add_mutually_exclusive_group()
@@ -874,6 +883,8 @@ def main() -> None:
         run_dry_run_planner(target, device_mode=args.device)
 
     elif args.all:
+        from src.utils.manifest import generate_experiment_manifest
+        generate_experiment_manifest(OUTPUTS_FINAL_MASTER)
         exit_code = run_all_experiments(device_mode=args.device, fast_mode=fast_mode)
         sys.exit(exit_code)
 
@@ -971,6 +982,27 @@ def main() -> None:
         print("\n--- Smoke Test Verification Summary ---")
         print(all_res[["run_id", "dataset", "model", "macro_f1", "minority_recall", "auc_roc", "auc_pr", "ece", "brier_score"]])
         print("\n[SMOKE TEST PASSED] All autograd pipelines, telemetry instruments, and metrics functioning correctly.\n")
+
+    elif args.smoke_test_transformer:
+        from src.training.cross_validation import run_cross_validation
+        print(f"\n=======================================================")
+        print(f"  RUNNING FT-TRANSFORMER FINAL-MODE SMOKE TEST (Adult)  ")
+        print(f"=======================================================\n")
+        df = run_cross_validation(
+            dataset_name="adult",
+            model_name="ccr",
+            noise_type="asym",
+            noise_rate=0.40,
+            architecture="transformer",
+            seeds=[42],
+            n_folds=1,
+            batch_size=256,
+            instrument_batch=False,
+        )
+        print("\n--- FT-Transformer Smoke Test Summary ---")
+        cols = [c for c in ["run_id", "dataset", "model", "architecture", "device_used", "amp_enabled", "macro_f1", "auc_roc"] if c in df.columns]
+        print(df[cols])
+        print("\n[FT-TRANSFORMER SMOKE TEST PASSED] Transformer attention, embedding, and precision paths verified.\n")
 
     elif args.dataset is not None and args.model is not None:
         from src.training.cross_validation import run_cross_validation

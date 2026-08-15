@@ -157,8 +157,9 @@ def test_tier1_cartesian_product_audit_validator():
 
 
 def test_scheduler_in_memory_run_id_cache(tmp_path):
-    """Verify that HeterogeneousJobScheduler uses in-memory caching for completion checks."""
+    """Verify that HeterogeneousJobScheduler uses in-memory caching and registers only successful runs."""
     from main import HeterogeneousJobScheduler, JobDescriptor
+    from src.training.train import make_run_id
 
     csv_path = tmp_path / "test_results.csv"
     scheduler = HeterogeneousJobScheduler(device_override="cpu")
@@ -168,12 +169,29 @@ def test_scheduler_in_memory_run_id_cache(tmp_path):
         model="ccr",
         noise_type="asym",
         noise_rate=0.20,
+        seeds=[42],
+        n_folds=2,
         results_path=str(csv_path),
     )
 
     # Initially not complete
     assert not scheduler._is_job_complete(job)
 
-    # Register completed job in-memory cache
-    scheduler._register_completed_job_ids(job, csv_path)
+    rid_f1 = make_run_id("adult", "ccr", "asym", 0.20, seed=42, fold=1)
+    rid_f2 = make_run_id("adult", "ccr", "asym", 0.20, seed=42, fold=2)
+
+    # 1. If fold 2 failed with FAILED_NAN, it must NOT be registered as complete
+    df_with_failure = pd.DataFrame([
+        {"run_id": rid_f1, "status": "SUCCESS"},
+        {"run_id": rid_f2, "status": "FAILED_NAN"},
+    ])
+    scheduler._register_completed_job_ids(job, csv_path, df_with_failure)
+    assert not scheduler._is_job_complete(job)  # Whole job is NOT complete because fold 2 failed
+
+    # 2. When fold 2 is retried and succeeds, job becomes complete
+    df_all_success = pd.DataFrame([
+        {"run_id": rid_f1, "status": "SUCCESS"},
+        {"run_id": rid_f2, "status": "SUCCESS"},
+    ])
+    scheduler._register_completed_job_ids(job, csv_path, df_all_success)
     assert scheduler._is_job_complete(job)

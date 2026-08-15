@@ -158,9 +158,15 @@ def run_cross_validation(
     results = []
 
     for seed in seeds:
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+        if n_folds == 1:
+            from sklearn.model_selection import StratifiedShuffleSplit
+            splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=seed)
+            splits = list(splitter.split(X, y))
+        else:
+            skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+            splits = list(skf.split(X, y))
 
-        for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
+        for fold_idx, (train_idx, test_idx) in enumerate(splits):
             fold = fold_idx + 1
             run_id = make_run_id(
                 dataset_name=dataset_name,

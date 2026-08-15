@@ -22,11 +22,10 @@ _RETRY_DELAY_SECONDS = 5
 
 
 def ensure_all_datasets_cached(datasets: Optional[List[str]] = None) -> None:
-    """Verify all specified datasets exist in data/raw/, automatically downloading missing ones from OpenML."""
-    from src.utils.config import CORE_10_DATASETS
-    target_datasets = datasets or CORE_10_DATASETS
+    """Verify all 14 study datasets exist in data/raw/, automatically downloading missing ones from OpenML."""
+    target_datasets = datasets or list(DATASETS.keys())
     logger.info("=================================================================")
-    logger.info("       CHECKING / DOWNLOADING REQUIRED BENCHMARK DATASETS        ")
+    logger.info("       CHECKING / DOWNLOADING ALL 14 STUDY DATASETS             ")
     logger.info("=================================================================")
     for ds_name in target_datasets:
         csv_path = DATA_RAW / f"{ds_name}.csv"

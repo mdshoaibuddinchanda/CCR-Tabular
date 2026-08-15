@@ -33,6 +33,7 @@ _RESULT_FILES = [
     OUTPUTS_METRICS / "tier3_architecture_transfer_results.csv",
     OUTPUTS_METRICS / "tier4_multiclass_results.csv",
     OUTPUTS_METRICS / "tier5_natural_noise_results.csv",
+    OUTPUTS_METRICS / "tier5_real_world_external_results.csv",
     OUTPUTS_METRICS / "pure_normalization_controls_results.csv",
     OUTPUTS_METRICS / "optimizer_study_results.csv",
 ]
@@ -61,6 +62,9 @@ def build_canonical_master_store() -> pd.DataFrame:
     combined.to_csv(CANONICAL_MASTER_CSV, index=False)
     logger.info(f"Canonical master store updated: {len(combined)} unique runs -> {CANONICAL_MASTER_CSV}")
     return combined
+
+
+build_canonical_results_store = build_canonical_master_store
 
 
 def generate_benchmark_summary_table(

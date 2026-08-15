@@ -276,7 +276,7 @@ def train_ccr_fold(
 
             with torch.no_grad():
                 probs = F.softmax(logits.detach(), dim=1)
-                criterion.update_history(probs, idx_b, epoch)
+                criterion.update_history(probs, idx_b, epoch, targets=y_b)
 
         if batch_gate_fracs:
             epoch_gate_fracs.append(float(np.mean(batch_gate_fracs)))

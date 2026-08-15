@@ -1,13 +1,9 @@
-"""Tier 5: Real-World & Naturally Noisy Datasets (Section G).
+"""Tier 5: Real-World Clinical External Validation.
 
-Reviewer 1 noted:
-  "The real-world robustness claims need moderation because current experiments are synthetic-noise experiments.
-  A naturally noisy dataset gives external validity that synthetic noise cannot."
-
-This script evaluates:
-  - Naturally noisy real-world tabular datasets (heart_disease, breast_cancer)
-  - Evaluates models without artificial noise injection (evaluating inherent label noise robustness)
-  - Models: CE, WCE, Focal, GCE, SCE, ELR, Norm-WCE, Norm-Focal, CCR-NoNorm, CCR
+Evaluates:
+  - 2 Real-world clinical tabular datasets: Heart Disease (N=462) & Breast Cancer (N=286)
+  - Inherent real-world annotation ambiguity without synthetic corruption
+  - Canonical 10 Losses: CE, WCE, Norm-WCE, Focal, Norm-Focal, GCE, SCE, ELR, CCR-NoNorm, CCR
 """
 
 import argparse
@@ -22,12 +18,10 @@ sys.path.insert(0, str(_ROOT))
 import pandas as pd
 
 from src.training.cross_validation import run_cross_validation
-from src.utils.config import NATURAL_NOISE_DATASETS, OUTPUTS_METRICS
+from src.utils.config import LOSS_NAMES, OUTPUTS_METRICS, REAL_WORLD_DATASETS, SEEDS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-
-_TIER5_LOSSES = ["ce", "wce", "focal", "gce", "sce", "elr", "norm_wce", "norm_focal", "ccr_no_norm", "ccr"]
+logger = logging.getLogger("Tier5RealWorld")
 
 
 def run_tier5_natural_noise_experiments(
@@ -36,20 +30,20 @@ def run_tier5_natural_noise_experiments(
     seeds: Optional[List[int]] = None,
     n_folds: int = 5,
 ) -> pd.DataFrame:
-    """Run Tier 5 naturally noisy datasets benchmark."""
+    """Run Tier 5 real-world external validation benchmark."""
     if datasets is None:
-        datasets = NATURAL_NOISE_DATASETS
+        datasets = REAL_WORLD_DATASETS
     if losses is None:
-        losses = _TIER5_LOSSES
+        losses = LOSS_NAMES
     if seeds is None:
-        seeds = [42, 123, 2024]
+        seeds = SEEDS
 
-    out_csv = OUTPUTS_METRICS / "tier5_natural_noise_results.csv"
-    logger.info(f"Starting Tier 5 Natural Noise Benchmark on {datasets}...")
+    out_csv = OUTPUTS_METRICS / "tier5_real_world_external_results.csv"
+    logger.info(f"Starting Tier 5 Real-World External Validation on {datasets}...")
 
     for ds in datasets:
         for loss_name in losses:
-            logger.info(f"Tier 5 Natural Noise: [{ds}] | Loss: {loss_name} | Inherent Natural Noise")
+            logger.info(f"Tier 5 Real-World: [{ds}] | Loss: {loss_name} | Inherent Annotation Ambiguity")
             run_cross_validation(
                 dataset_name=ds,
                 model_name=loss_name,
@@ -61,7 +55,6 @@ def run_tier5_natural_noise_experiments(
             )
 
     res_df = pd.read_csv(out_csv) if out_csv.exists() else pd.DataFrame()
-    logger.info(f"Tier 5 natural noise benchmark complete. Results saved to {out_csv}")
     return res_df
 
 

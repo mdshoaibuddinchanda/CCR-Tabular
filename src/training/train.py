@@ -56,10 +56,12 @@ def make_run_id(
     seed: int,
     fold: int,
     architecture: str = "mlp",
+    optimizer_name: str = "AdamW",
 ) -> str:
-    """Generate unique run identifier."""
+    """Generate unique run identifier with optimizer disambiguation."""
     rate_str = f"{int(noise_rate * 100):02d}"
-    return f"{dataset_name}_{model_name}_{architecture}_{noise_type}_{rate_str}_seed{seed}_fold{fold}"
+    opt_suffix = f"_{optimizer_name}" if optimizer_name and optimizer_name != "AdamW" else ""
+    return f"{dataset_name}_{model_name}_{architecture}_{noise_type}_{rate_str}{opt_suffix}_seed{seed}_fold{fold}"
 
 
 def train_one_fold(
@@ -91,10 +93,21 @@ def train_one_fold(
     fix_all_seeds(seed)
 
     if run_id is None:
-        run_id = make_run_id(dataset_name, model_name, noise_type, noise_rate, seed, fold, architecture)
+        run_id = make_run_id(
+            dataset_name=dataset_name,
+            model_name=model_name,
+            noise_type=noise_type,
+            noise_rate=noise_rate,
+            seed=seed,
+            fold=fold,
+            architecture=architecture,
+            optimizer_name=optimizer_name,
+        )
 
     wall_start = time.perf_counter()
-    if torch.cuda.is_available():
+    if device is None:
+        device = get_device()
+    if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
     run_logger = RunLogger(
@@ -154,7 +167,7 @@ def train_one_fold(
     wall_time_s = time.perf_counter() - wall_start
     best_metrics["train_time_s"] = round(wall_time_s, 3)
 
-    if torch.cuda.is_available():
+    if device is not None and device.type == "cuda" and torch.cuda.is_available():
         peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
         best_metrics["peak_vram_mb"] = round(peak_vram_mb, 2)
         torch.cuda.empty_cache()
@@ -225,6 +238,9 @@ def _train_neural_model(
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+    # Initialize AMP gradient scaler on CUDA
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and device.type == "cuda"))
+
     train_dataset = TabularDataset(X_train, y_train)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
 
@@ -240,6 +256,7 @@ def _train_neural_model(
         model.train()
         epoch_loss = 0.0
         n_batches = 0
+        hit_nan = False
 
         for b_idx, (X_batch, y_batch, idx_batch) in enumerate(train_loader):
             X_batch = X_batch.to(device)
@@ -247,7 +264,7 @@ def _train_neural_model(
             idx_batch = idx_batch.to(device)
 
             optimizer.zero_grad()
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(use_amp and device.type == "cuda")):
                 logits = model(X_batch)
 
                 # Compute loss
@@ -258,10 +275,13 @@ def _train_neural_model(
                 else:
                     loss = criterion(logits, y_batch)
 
-            if torch.isnan(loss):
+            if torch.isnan(loss) or not torch.isfinite(loss):
+                logger.warning(f"Non-finite loss ({loss}) encountered in {run_id} at epoch {epoch}. Stopping.")
+                hit_nan = True
                 break
 
-            loss.backward(retain_graph=instrument_batch)
+            # Backward with gradient scaler
+            scaler.scale(loss).backward(retain_graph=instrument_batch)
 
             # Instrument batch before step (autograd graph alive for unweighted grads)
             prev_params = None
@@ -283,21 +303,26 @@ def _train_neural_model(
                 )
                 prev_params = {name: p.data.clone() for name, p in model.named_parameters()}
 
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # Record exact parameter step ||theta_{t+1} - theta_t||_2
             if instrument_batch:
                 instrumenter.record_post_step(prev_params=prev_params, model=model)
 
-            # Update history tensor after step
+            # Update history tensor after step (pass observed target labels for true-class probability p_{i, y_i})
             if hasattr(criterion, "update_history"):
                 with torch.no_grad():
                     probs = F.softmax(logits.detach(), dim=1)
-                    criterion.update_history(probs, idx_batch, epoch)
+                    criterion.update_history(probs, idx_batch, epoch, targets=y_batch)
 
             epoch_loss += loss.item()
             n_batches += 1
+
+        if hit_nan and epoch == 0:
+            return model, {"macro_f1": 0.0, "status": "FAILED_NAN", "best_epoch": 0}
 
         # Validation
         val_metrics = _validate_neural_model(model, X_val, y_val, device)

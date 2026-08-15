@@ -221,18 +221,24 @@ class CCRLoss(nn.Module):
         probs: torch.Tensor,
         sample_indices: torch.Tensor,
         current_epoch: int,
+        targets: Optional[torch.Tensor] = None,
     ) -> None:
-        """Update confidence history tensor after optimizer step.
+        """Update confidence history tensor for observed true class after optimizer step.
 
         Args:
             probs: Detached softmax probabilities [B, C].
             sample_indices: Sample indices [B].
             current_epoch: Current epoch index.
+            targets: Optional ground-truth target indices [B]. If provided, stores
+                     p_{i, y_i} (true-class probability); otherwise falls back to max(probs).
         """
         with torch.no_grad():
             col = current_epoch % self.K
-            max_probs = probs.detach().max(dim=1).values  # [B]
-            self.history[sample_indices, col] = max_probs
+            if targets is not None:
+                true_probs = probs.detach()[torch.arange(len(targets), device=probs.device), targets]
+            else:
+                true_probs = probs.detach().max(dim=1).values
+            self.history[sample_indices, col] = true_probs
 
     def _compute_variance(
         self,

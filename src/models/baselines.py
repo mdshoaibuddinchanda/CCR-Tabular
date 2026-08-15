@@ -194,7 +194,7 @@ class NeuralBaseline(BaselineModel):
                 if hasattr(loss_fn, "update_history"):
                     with torch.no_grad():
                         probs = F.softmax(logits.detach(), dim=1)
-                        loss_fn.update_history(probs, idx_b, epoch)
+                        loss_fn.update_history(probs, idx_b, epoch, targets=y_b)
 
             # Validation
             if X_val is not None and y_val is not None:

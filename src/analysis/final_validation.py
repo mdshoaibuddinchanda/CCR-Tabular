@@ -1,14 +1,16 @@
-"""Automated Scientific Consistency and Pre-Publication Audit Checker.
+"""Automated Scientific Consistency and Pre-Publication Provenance Validator.
 
 Enforces strict verification rules:
   1. Metadata Integrity: claimed_dataset_N == audited_dataset_N, claimed_IR == audited_IR.
+     FAILS if any registered dataset is missing from audit report.
   2. Data Store Invariants: Zero duplicate run_ids, no NaN/Inf metrics, all metric bounds in [0, 1].
+     Verifies optimizer disambiguation and execution status.
   3. Clean Evaluation Invariant: Test and validation sets are strictly uncorrupted ground truth.
   4. Statistical Verification: BH-FDR multiplicity correction and 95% CIs computed.
   5. Scientific Guardrails:
-     - Fails if '3-4x inflation' or '3x-4x' is claimed.
-     - Fails if 'normalization drives robustness' is claimed.
-     - Fails if 'AUC = calibration' or 'AUC measures calibration' is claimed.
+     - Fails if '3-4x inflation' or '3x-4x' is claimed without refutation context.
+     - Fails if 'normalization drives robustness' is claimed without qualification.
+     - Fails if 'AUC measures calibration' is claimed.
 """
 
 import logging
@@ -23,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.data.audit_datasets import run_full_dataset_audit
-from src.utils.config import DATASETS, OUTPUTS_METRICS
+from src.utils.config import CORE_10_DATASETS, DATASETS, OUTPUTS_METRICS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ScientificValidator")
@@ -33,7 +35,7 @@ def run_scientific_validation(
     canonical_csv: Optional[Path] = None,
     master_doc: Optional[Path] = None,
 ) -> bool:
-    """Run full automated pre-publication scientific consistency audit."""
+    """Run full automated pre-publication scientific consistency and provenance audit."""
     c_csv = canonical_csv or (OUTPUTS_METRICS / "canonical_master_results.csv")
     doc_path = master_doc or (_ROOT / "manuscript_experiment_results_and_theory.md")
 
@@ -52,13 +54,16 @@ def run_scientific_validation(
 
     for ds_name, meta in DATASETS.items():
         sub = audit_df[audit_df["dataset"] == ds_name]
-        if len(sub) > 0:
-            actual_n = sub.iloc[0]["n_samples"]
-            actual_ir = sub.iloc[0]["imbalance_ratio"]
-            if meta.get("n_samples") != actual_n:
-                failures.append(f"Metadata N mismatch for {ds_name}: Config={meta.get('n_samples')} vs Audit={actual_n}")
-            if "ir" in meta and abs(meta["ir"] - actual_ir) > 0.1:
-                failures.append(f"Metadata IR mismatch for {ds_name}: Config={meta['ir']} vs Audit={actual_ir:.2f}")
+        if len(sub) == 0:
+            failures.append(f"Audit Failure: Registered dataset '{ds_name}' is missing from dataset audit report.")
+            continue
+
+        actual_n = sub.iloc[0]["n_samples"]
+        actual_ir = sub.iloc[0]["imbalance_ratio"]
+        if meta.get("n_samples") != actual_n:
+            failures.append(f"Metadata N mismatch for {ds_name}: Config={meta.get('n_samples')} vs Audit={actual_n}")
+        if "ir" in meta and abs(meta["ir"] - actual_ir) > 0.1:
+            failures.append(f"Metadata IR mismatch for {ds_name}: Config={meta['ir']} vs Audit={actual_ir:.2f}")
 
     # ── Check 2: Canonical Database Integrity ──
     logger.info("[Check 2/5] Verifying Canonical Database Invariants...")
@@ -70,6 +75,12 @@ def run_scientific_validation(
         if df_can["run_id"].duplicated().any():
             n_dup = df_can["run_id"].duplicated().sum()
             failures.append(f"Found {n_dup} duplicate run_ids in canonical master store.")
+
+        # Check for presence of Core-10 datasets
+        present_ds = set(df_can["dataset"].unique())
+        missing_core = [c_ds for c_ds in CORE_10_DATASETS if c_ds not in present_ds]
+        if missing_core:
+            logger.info(f"Canonical store contains {len(present_ds)} datasets. Core-10 pending: {missing_core}")
 
         # Check for NaN / Inf
         metrics_to_check = ["macro_f1", "minority_recall", "auc_roc", "auc_pr", "ece", "brier_score"]

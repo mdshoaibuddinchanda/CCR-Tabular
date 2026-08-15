@@ -1,7 +1,7 @@
 """Stratified K-Fold cross-validation orchestration for CCR-Tabular.
 
 Handles CV fold generation, fold-local preprocessing, fold-local noise generation,
-training, test evaluation, metric persistence, and in-memory preprocessing caching.
+training, test evaluation, metric persistence, and bounded in-memory fold caching.
 """
 
 import logging
@@ -28,8 +28,9 @@ from src.utils.config import (
 
 logger = logging.getLogger(__name__)
 
-# Global in-memory cache for preprocessed fold arrays
-_SPLIT_CACHE: Dict[Tuple, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+# Bounded global in-memory cache for preprocessed fold arrays (max 30 items)
+_SPLIT_CACHE: Dict[Tuple, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]] = {}
+_MAX_CACHE_ITEMS = 30
 
 
 def _get_or_create_fold_split(
@@ -42,8 +43,8 @@ def _get_or_create_fold_split(
     noise_rate: float,
     seed: int,
     fold: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Retrieve preprocessed fold splits from memory cache or compute and cache them."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Retrieve preprocessed fold splits from bounded memory cache or compute and cache them."""
     cache_key = (dataset_name, noise_type, noise_rate, seed, fold)
     if cache_key in _SPLIT_CACHE:
         return _SPLIT_CACHE[cache_key]
@@ -75,7 +76,7 @@ def _get_or_create_fold_split(
     )
 
     # Noise injection (training split ONLY)
-    y_tr_noisy, _noise_stats = generate_noise(
+    y_tr_noisy, noise_stats = generate_noise(
         X_train=X_tr_np,
         y_train=y_tr_np,
         noise_type=noise_type,
@@ -84,19 +85,30 @@ def _get_or_create_fold_split(
         n_classes=n_classes,
     )
 
-    split_data = (X_tr_np, y_tr_noisy, X_val_np, y_val_np, X_test_np, y_test_np, y_tr_np)
+    # Evict oldest entry if cache exceeds capacity
+    if len(_SPLIT_CACHE) >= _MAX_CACHE_ITEMS:
+        oldest_key = next(iter(_SPLIT_CACHE))
+        _SPLIT_CACHE.pop(oldest_key, None)
+
+    split_data = (X_tr_np, y_tr_noisy, X_val_np, y_val_np, X_test_np, y_test_np, y_tr_np, noise_stats)
     _SPLIT_CACHE[cache_key] = split_data
     return split_data
 
 
 def _is_already_completed(run_id: str, results_path: Path) -> bool:
-    """Check if run_id is already completed in target CSV file."""
+    """Check if run_id is already completed successfully in target CSV file."""
     if not results_path.exists():
         return False
     try:
         df_existing = pd.read_csv(results_path)
-        if "run_id" in df_existing.columns and run_id in df_existing["run_id"].values:
-            return True
+        if "run_id" in df_existing.columns:
+            matched = df_existing[df_existing["run_id"] == run_id]
+            if len(matched) > 0:
+                # Ensure it has valid non-NaN metric
+                if "macro_f1" in matched.columns and pd.notna(matched["macro_f1"].iloc[0]):
+                    if "status" in matched.columns:
+                        return matched["status"].iloc[0] in ("SUCCESS", "SUCCESS_CPU_FALLBACK")
+                    return True
     except Exception:
         pass
     return False
@@ -117,7 +129,7 @@ def run_cross_validation(
     device: Optional[Any] = None,
     use_amp: Optional[bool] = None,
 ) -> pd.DataFrame:
-    """Run full stratified cross-validation with in-memory fold caching."""
+    """Run full stratified cross-validation with bounded in-memory fold caching."""
     if dataset_name not in DATASETS:
         raise ValueError(f"Unknown dataset '{dataset_name}'.")
 
@@ -147,6 +159,7 @@ def run_cross_validation(
                 seed=seed,
                 fold=fold,
                 architecture=architecture,
+                optimizer_name=optimizer_name,
             )
 
             # Check if run exists (idempotent resume)
@@ -157,7 +170,7 @@ def run_cross_validation(
             # In-memory cached split and preprocessing
             (
                 X_tr_np, y_tr_noisy, X_val_np, y_val_np,
-                X_test_np, y_test_np, y_tr_clean,
+                X_test_np, y_test_np, y_tr_clean, noise_stats,
             ) = _get_or_create_fold_split(
                 dataset_name=dataset_name,
                 X=X,
@@ -193,6 +206,7 @@ def run_cross_validation(
             )
 
             # Evaluate on untouched test fold
+            actual_rate = noise_stats.get("actual_noise_rate", noise_rate)
             test_metrics = evaluate_model(
                 model_or_path=model,
                 X_test=X_test_np,
@@ -202,22 +216,20 @@ def run_cross_validation(
                     "dataset": dataset_name,
                     "model": model_name,
                     "architecture": architecture,
+                    "optimizer": optimizer_name,
                     "fold": fold,
                     "seed": seed,
                     "noise_type": noise_type,
                     "noise_rate": noise_rate,
+                    "actual_noise_rate": actual_rate,
+                    "status": val_metrics.get("status", "SUCCESS"),
                     "train_time_s": val_metrics.get("train_time_s", 0.0),
                     "peak_vram_mb": val_metrics.get("peak_vram_mb", 0.0),
                     "n_epochs": val_metrics.get("n_epochs", 0),
                 },
+                results_path=target_csv,
+                device=device,
             )
-
-            # Append to persistent CSV immediately
-            df_single = pd.DataFrame([test_metrics])
-            if target_csv.exists() and target_csv.stat().st_size > 0:
-                df_single.to_csv(target_csv, mode="a", header=False, index=False)
-            else:
-                df_single.to_csv(target_csv, mode="w", header=True, index=False)
 
             results.append(test_metrics)
 

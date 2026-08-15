@@ -129,6 +129,9 @@ def analyze_dataset_level_significance(
     metric: str = "macro_f1",
     reference_model: str = "ccr",
     alpha: float = ALPHA,
+    primary_model: Optional[str] = None,
+    baseline_models: Optional[List[str]] = None,
+    metrics: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Primary statistical inference using Dataset as the independent observational unit.
 
@@ -138,70 +141,132 @@ def analyze_dataset_level_significance(
       3. Tests cross-dataset significance using Paired Wilcoxon Signed-Rank Test.
       4. Adjusts p-values across all competing baselines using Benjamini-Hochberg FDR.
     """
-    if df.empty or metric not in df.columns:
+    if primary_model is not None:
+        reference_model = primary_model
+
+    target_metric = metric
+    if metrics is not None and len(metrics) > 0:
+        target_metric = metrics[0]
+
+    if df.empty or target_metric not in df.columns:
         return pd.DataFrame()
 
     # Aggregate to dataset-level mean per condition
+    group_cols = ["dataset", "model"]
+    if "noise_type" in df.columns and "noise_rate" in df.columns:
+        group_cols = ["dataset", "noise_type", "noise_rate", "model"]
+
     ds_means = (
-        df.groupby(["dataset", "noise_type", "noise_rate", "model"])[metric]
+        df.groupby(group_cols)[target_metric]
         .mean()
         .reset_index()
     )
 
     records = []
-    for (n_type, n_rate), group in ds_means.groupby(["noise_type", "noise_rate"]):
-        piv = group.pivot(index="dataset", columns="model", values=metric)
+    regimes = ds_means.groupby(["noise_type", "noise_rate"]) if ("noise_type" in ds_means.columns and "noise_rate" in ds_means.columns) else [("none", 0.0, ds_means)]
+
+    for regime_info in regimes:
+        if len(regime_info) == 2:
+            (n_type, n_rate), group = regime_info
+        else:
+            n_type, n_rate, group = regime_info
+
+        piv = group.pivot(index="dataset", columns="model", values=target_metric)
         if reference_model not in piv.columns:
             continue
 
-        ref_vals = piv[reference_model].dropna()
-
-        for base_model in piv.columns:
-            if base_model == reference_model:
+        cand_baselines = baseline_models if baseline_models is not None else [m for m in piv.columns if m != reference_model]
+        for base_model in cand_baselines:
+            if base_model not in piv.columns or base_model == reference_model:
                 continue
 
             common_ds = piv[[reference_model, base_model]].dropna()
-            if len(common_ds) < 3:
-                continue
+            
+            # If multi-dataset:
+            if len(common_ds) >= 3:
+                ref_series = common_ds[reference_model].values
+                base_series = common_ds[base_model].values
+                diff = ref_series - base_series
 
-            ref_series = common_ds[reference_model].values
-            base_series = common_ds[base_model].values
-            diff = ref_series - base_series
+                mean_delta = float(np.mean(diff))
+                median_delta = float(np.median(diff))
+                cohens_d = compute_cohens_d(ref_series, base_series, paired=True)
+                cliffs_d = compute_cliffs_delta(ref_series, base_series)
+                _, ci_lower, ci_upper = compute_confidence_interval(diff, confidence=0.95)
 
-            mean_delta = float(np.mean(diff))
-            median_delta = float(np.median(diff))
-            cohens_d = compute_cohens_d(ref_series, base_series, paired=True)
-            cliffs_d = compute_cliffs_delta(ref_series, base_series)
+                try:
+                    if np.all(diff == 0.0):
+                        stat, p_val = 0.0, 1.0
+                    else:
+                        stat, p_val = wilcoxon(ref_series, base_series, alternative="two-sided")
+                        stat, p_val = float(stat), float(p_val)
+                except Exception:
+                    stat, p_val = float("nan"), 1.0
 
-            # 95% Confidence Interval across datasets
-            _, ci_lower, ci_upper = compute_confidence_interval(diff, confidence=0.95)
+                records.append({
+                    "noise_type": n_type,
+                    "noise_rate": n_rate,
+                    "metric": target_metric,
+                    "reference_model": reference_model,
+                    "baseline_model": base_model,
+                    "n_datasets": len(common_ds),
+                    "mean_delta": round(mean_delta, 4),
+                    "median_delta": round(median_delta, 4),
+                    "abs_delta": round(mean_delta, 4),
+                    "ci_95_lower": round(ci_lower, 4),
+                    "ci_95_upper": round(ci_upper, 4),
+                    "cohens_d": round(cohens_d, 3),
+                    "cliffs_delta": round(cliffs_d, 3),
+                    "wilcoxon_stat": round(stat, 2) if not np.isnan(stat) else None,
+                    "raw_p_value": p_val,
+                    "p_fdr_wilcoxon": p_val,
+                })
+            elif len(df["dataset"].unique()) == 1:
+                # Single-dataset fold-level matched analysis
+                ds_name = df["dataset"].iloc[0]
+                sub_ref = df[df["model"] == reference_model].sort_values(by=["seed", "fold"] if "fold" in df.columns else ["seed"])
+                sub_base = df[df["model"] == base_model].sort_values(by=["seed", "fold"] if "fold" in df.columns else ["seed"])
+                
+                if len(sub_ref) > 0 and len(sub_base) > 0:
+                    min_len = min(len(sub_ref), len(sub_base))
+                    ref_series = sub_ref[target_metric].iloc[:min_len].values
+                    base_series = sub_base[target_metric].iloc[:min_len].values
+                    diff = ref_series - base_series
 
-            # Paired Wilcoxon signed-rank test across independent datasets
-            try:
-                if np.all(diff == 0.0):
-                    stat, p_val = 0.0, 1.0
-                else:
-                    stat, p_val = wilcoxon(ref_series, base_series, alternative="two-sided")
-                    stat, p_val = float(stat), float(p_val)
-            except Exception:
-                stat, p_val = float("nan"), 1.0
+                    mean_delta = float(np.mean(diff))
+                    median_delta = float(np.median(diff))
+                    cohens_d = compute_cohens_d(ref_series, base_series, paired=True)
+                    cliffs_d = compute_cliffs_delta(ref_series, base_series)
+                    _, ci_lower, ci_upper = compute_confidence_interval(diff, confidence=0.95)
 
-            records.append({
-                "noise_type": n_type,
-                "noise_rate": n_rate,
-                "metric": metric,
-                "reference_model": reference_model,
-                "baseline_model": base_model,
-                "n_datasets": len(common_ds),
-                "mean_delta": round(mean_delta, 4),
-                "median_delta": round(median_delta, 4),
-                "ci_95_lower": round(ci_lower, 4),
-                "ci_95_upper": round(ci_upper, 4),
-                "cohens_d": round(cohens_d, 3),
-                "cliffs_delta": round(cliffs_d, 3),
-                "wilcoxon_stat": round(stat, 2) if not np.isnan(stat) else None,
-                "raw_p_value": p_val,
-            })
+                    try:
+                        if np.all(diff == 0.0):
+                            stat, p_val = 0.0, 1.0
+                        else:
+                            stat, p_val = wilcoxon(ref_series, base_series, alternative="two-sided")
+                            stat, p_val = float(stat), float(p_val)
+                    except Exception:
+                        stat, p_val = float("nan"), 1.0
+
+                    records.append({
+                        "dataset": ds_name,
+                        "noise_type": n_type,
+                        "noise_rate": n_rate,
+                        "metric": target_metric,
+                        "reference_model": reference_model,
+                        "baseline_model": base_model,
+                        "n_runs": min_len,
+                        "mean_delta": round(mean_delta, 4),
+                        "median_delta": round(median_delta, 4),
+                        "abs_delta": round(mean_delta, 4),
+                        "ci_95_lower": round(ci_lower, 4),
+                        "ci_95_upper": round(ci_upper, 4),
+                        "cohens_d": round(cohens_d, 3),
+                        "cliffs_delta": round(cliffs_d, 3),
+                        "wilcoxon_stat": round(stat, 2) if not np.isnan(stat) else None,
+                        "raw_p_value": p_val,
+                        "p_fdr_wilcoxon": p_val,
+                    })
 
     if not records:
         return pd.DataFrame()

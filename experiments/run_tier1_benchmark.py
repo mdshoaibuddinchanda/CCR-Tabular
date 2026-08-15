@@ -1,21 +1,21 @@
 """Tier 1: Core 10-Dataset Master Benchmark across 10 Loss Functions (10+2+2 Design).
 
 10 Core Binary Datasets:
-  1. Adult (N=48,842, IR=3.17) — Large, mixed features, standard benchmark
-  2. Bank (N=45,211, IR=7.55) — Large scale + strong imbalance
+  1. Adult (N=48,842, IR=3.17) — Large, mixed features, standard census benchmark
+  2. Bank (N=45,211, IR=7.55) — Large scale + strong marketing imbalance
   3. MAGIC (N=19,020, IR=1.84) — Medium scale, continuous gamma physics
-  4. Phoneme (N=5,404, IR=2.41) — Medium scale, acoustics / signal
+  4. Phoneme (N=5,404, IR=2.41) — Medium scale, acoustics / speech signal
   5. Spambase (N=4,601, IR=1.54) — Continuous text-derived features
   6. Credit-G (N=1,000, IR=2.33) — Small mixed tabular finance
-  7. Churn (N=10,000, IR=3.90) — Customer behavior with moderate-to-high imbalance
-  8. Electricity (N=45,312, IR=1.35) — Large-scale, energy domain
-  9. WILT (N=4,839, IR=17.50) — Severe/extreme imbalance regime
-  10. Ionosphere (N=351, IR=1.79) — Low-N stress test
+  7. Churn (N=5,000, IR=6.07) — Customer behavior with moderate-to-high imbalance
+  8. Electricity (N=45,312, IR=1.36) — Large-scale, energy demand
+  9. WILT (N=4,839, IR=17.54) — Severe/extreme imbalance regime
+  10. Ionosphere (N=351, IR=1.79) — Low-N aerospace radar stress test
 
 Evaluates:
-  - 10 Losses: CE, WCE, Focal, GCE, SCE, ELR, Norm-WCE, Norm-Focal, Norm-GCE, Norm-SCE, CCR-NoNorm, CCR
-  - Noise conditions: Clean, Asymmetric (10-40%), Symmetric (10-40%), Feature-Correlated (10-30%), IDN (10-30%)
-  - Full Benjamini-Hochberg FDR correction and Cohen's d effect sizes.
+  - 10 Canonical Losses: CE, WCE, Norm-WCE, Focal, Norm-Focal, GCE, SCE, ELR, CCR-NoNorm, CCR
+  - 4 Primary Noise Conditions: Clean (0%), Asymmetric 20%, Asymmetric 40%, Symmetric 20%
+  - Full Benjamini-Hochberg FDR correction and Cohen's d effect sizes with Dataset as the primary observational unit.
 """
 
 import argparse
@@ -29,7 +29,6 @@ sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
 
-from src.training.cross_validation import run_cross_validation
 from src.utils.config import (
     CORE_10_DATASETS,
     LOSS_NAMES,
@@ -40,7 +39,7 @@ from src.utils.config import (
 from src.utils.statistics import analyze_dataset_level_significance
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Tier1Benchmark")
 
 
 def run_tier1_benchmark(
@@ -48,16 +47,17 @@ def run_tier1_benchmark(
     models: Optional[List[str]] = None,
     noise_configs: Optional[List[tuple]] = None,
     seeds: Optional[List[int]] = None,
-    n_folds: int = 3,
+    n_folds: int = N_FOLDS,
+    fast_mode: bool = True,
+    device_override: str = "auto",
 ) -> pd.DataFrame:
-    """Run core 10-dataset master benchmark."""
+    """Run core 10-dataset master benchmark using heterogeneous scheduling."""
+    from main import HeterogeneousJobScheduler, JobDescriptor
+
     if datasets is None:
         datasets = CORE_10_DATASETS
     if models is None:
-        models = [
-            "ce", "wce", "focal", "gce", "sce", "elr",
-            "ccr_no_norm", "ccr",
-        ]
+        models = LOSS_NAMES  # Canonical 10 losses
     if noise_configs is None:
         noise_configs = [
             ("none", 0.0),
@@ -66,26 +66,34 @@ def run_tier1_benchmark(
             ("sym", 0.20),
         ]
     if seeds is None:
-        seeds = [42, 123]
+        seeds = SEEDS
 
     out_csv = OUTPUTS_METRICS / "tier1_core10_results.csv"
     logger.info(f"Starting Tier 1 Master Benchmark on 10 Core Datasets: {datasets}...")
 
+    scheduler = HeterogeneousJobScheduler(device_override=device_override, fast_mode=fast_mode)
+    jobs: List[JobDescriptor] = []
+
     for ds in datasets:
         for model_name in models:
             for n_type, n_rate in noise_configs:
-                logger.info(
-                    f"Tier 1: [{ds}] | Loss: {model_name} | Noise: {n_type}@{n_rate:.0%}"
+                jobs.append(
+                    JobDescriptor(
+                        dataset=ds,
+                        model=model_name,
+                        noise_type=n_type,
+                        noise_rate=n_rate,
+                        architecture="mlp",
+                        seeds=seeds,
+                        n_folds=n_folds,
+                        instrument_batch=False,
+                        results_path=str(out_csv),
+                        tier_name="tier1",
+                    )
                 )
-                run_cross_validation(
-                    dataset_name=ds,
-                    model_name=model_name,
-                    noise_type=n_type,
-                    noise_rate=n_rate,
-                    seeds=seeds,
-                    n_folds=n_folds,
-                    results_path=out_csv,
-                )
+
+    scheduler.run_jobs_heterogeneous(jobs)
+    scheduler.print_final_summary()
 
     res_df = pd.read_csv(out_csv) if out_csv.exists() else pd.DataFrame()
 
@@ -107,8 +115,16 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default=None, help="Run single dataset.")
     parser.add_argument("--model", type=str, default=None, help="Run single model/loss.")
     parser.add_argument("--n_folds", type=int, default=N_FOLDS)
+    parser.add_argument("--device", type=str, default="auto", help="Execution device.")
+    parser.add_argument("--safe", action="store_true", help="Run in safe debugging mode.")
     args = parser.parse_args()
 
     ds_list = [args.dataset] if args.dataset else None
     model_list = [args.model] if args.model else None
-    run_tier1_benchmark(datasets=ds_list, models=model_list, n_folds=args.n_folds)
+    run_tier1_benchmark(
+        datasets=ds_list,
+        models=model_list,
+        n_folds=args.n_folds,
+        fast_mode=not args.safe,
+        device_override=args.device,
+    )

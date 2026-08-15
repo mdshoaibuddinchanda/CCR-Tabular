@@ -1,10 +1,13 @@
 """Model evaluation and results persistence for CCR-Tabular.
 
 Loads saved models, runs inference on test sets, computes all metrics
-(including calibration metrics ECE and Brier score), and appends results to CSV.
+(including calibration metrics ECE and Brier score), and appends results to CSV
+with process-safe locking and explicit run status tracking.
 """
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
@@ -22,8 +25,8 @@ logger = logging.getLogger(__name__)
 _RESULTS_CSV = OUTPUTS_METRICS / "results.csv"
 
 _RESULTS_COLUMNS = [
-    "run_id", "dataset", "model", "architecture", "fold", "seed",
-    "noise_type", "noise_rate",
+    "run_id", "dataset", "model", "architecture", "optimizer", "fold", "seed",
+    "noise_type", "noise_rate", "actual_noise_rate", "status",
     "accuracy", "macro_f1", "minority_recall", "auc_roc", "auc_pr",
     "ece", "brier_score",
     "train_time_s", "peak_vram_mb", "n_epochs",
@@ -41,9 +44,10 @@ def evaluate_model(
     peak_vram_mb: float = 0.0,
     n_epochs: int = -1,
     results_path: Optional[Path] = None,
-) -> Dict[str, float]:
+    device: Optional[torch.device] = None,
+) -> Dict[str, Any]:
     """Evaluate trained model on untouched test set and persist results."""
-    y_pred, y_prob = _get_predictions(model_or_path, X_test)
+    y_pred, y_prob = _get_predictions(model_or_path, X_test, device=device)
 
     metrics = compute_all_metrics(
         y_true=y_test,
@@ -59,10 +63,13 @@ def evaluate_model(
         "dataset": metadata.get("dataset", ""),
         "model": metadata.get("model", ""),
         "architecture": metadata.get("architecture", "mlp"),
+        "optimizer": metadata.get("optimizer", "AdamW"),
         "fold": metadata.get("fold", -1),
         "seed": metadata.get("seed", -1),
         "noise_type": metadata.get("noise_type", "none"),
         "noise_rate": metadata.get("noise_rate", 0.0),
+        "actual_noise_rate": metadata.get("actual_noise_rate", metadata.get("noise_rate", 0.0)),
+        "status": metadata.get("status", "SUCCESS"),
         "accuracy": metrics["accuracy"],
         "macro_f1": metrics["macro_f1"],
         "minority_recall": metrics["minority_recall"],
@@ -81,27 +88,53 @@ def evaluate_model(
 
 
 def append_results(results_row: Dict, results_path: Path) -> None:
-    """Append one row to results CSV with deduplication."""
+    """Append one row to results CSV with process-safe file locking and deduplication."""
+    results_path = Path(results_path)
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = results_path.with_suffix(".lock")
+
     df_new = pd.DataFrame([results_row])
 
-    if results_path.exists():
-        try:
-            df_existing = pd.read_csv(results_path)
-            if "run_id" in df_existing.columns and results_row["run_id"] in df_existing["run_id"].values:
-                return
-            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        except Exception:
-            df_combined = df_new
-    else:
-        df_combined = df_new
+    # Simple cross-platform spin-lock with exponential backoff
+    lock_acquired = False
+    max_wait = 15.0
+    start_wait = time.time()
 
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    df_combined.to_csv(results_path, index=False)
+    while time.time() - start_wait < max_wait:
+        try:
+            # Atomic creation of lock file
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            lock_acquired = True
+            break
+        except FileExistsError:
+            time.sleep(0.05)
+
+    try:
+        if results_path.exists() and results_path.stat().st_size > 0:
+            try:
+                df_existing = pd.read_csv(results_path)
+                if "run_id" in df_existing.columns and results_row["run_id"] in df_existing["run_id"].values:
+                    return
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+            except Exception:
+                df_combined = df_new
+        else:
+            df_combined = df_new
+
+        df_combined.to_csv(results_path, index=False)
+    finally:
+        if lock_acquired and lock_path.exists():
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _get_predictions(
     model_or_path: Union[Any, Path],
     X_test: np.ndarray,
+    device: Optional[torch.device] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Extract hard predictions and probability array."""
     if isinstance(model_or_path, Path):
@@ -115,8 +148,9 @@ def _get_predictions(
         model = model_or_path
 
     if isinstance(model, torch.nn.Module):
-        from src.utils.reproducibility import get_device
-        device = get_device()
+        if device is None:
+            from src.utils.reproducibility import get_device
+            device = get_device()
         model.eval()
         model = model.to(device)
         with torch.no_grad():
@@ -134,4 +168,4 @@ def _get_predictions(
             preds = probs.argmax(axis=1)
         return preds, probs
 
-    raise RuntimeError(f"Cannot extract predictions from model of type {type(model)}.")
+    raise TypeError(f"Unsupported model type: {type(model_or_path)}.")

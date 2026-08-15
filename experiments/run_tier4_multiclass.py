@@ -1,8 +1,8 @@
-"""Tier 4: Multiclass Validation Experiments (Section R).
+"""Tier 4: Multiclass Validation Experiments.
 
 Evaluates:
-  - 2 Multiclass tabular datasets (segment, steel_faults)
-  - Loss functions: CE, WCE, Focal, GCE, SCE, CCR-NoNorm, CCR
+  - 2 Audited Multiclass tabular datasets: Segment (N=2,310, C=7) & Vehicle (N=846, C=4)
+  - Loss functions: CE, WCE, Focal, GCE, SCE, ELR, CCR-NoNorm, CCR
   - Multiclass noise injection (Symmetric noise 10-30%)
 """
 
@@ -21,9 +21,9 @@ from src.training.cross_validation import run_cross_validation
 from src.utils.config import MULTICLASS_DATASETS, OUTPUTS_METRICS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Tier4Multiclass")
 
-_TIER4_LOSSES = ["ce", "wce", "focal", "gce", "sce", "ccr_no_norm", "ccr"]
+_TIER4_LOSSES = ["ce", "wce", "focal", "gce", "sce", "elr", "ccr_no_norm", "ccr"]
 
 
 def run_tier4_multiclass_experiments(
@@ -60,7 +60,6 @@ def run_tier4_multiclass_experiments(
                 )
 
     res_df = pd.read_csv(out_csv) if out_csv.exists() else pd.DataFrame()
-    logger.info(f"Tier 4 multiclass benchmark complete. Results saved to {out_csv}")
     return res_df
 
 

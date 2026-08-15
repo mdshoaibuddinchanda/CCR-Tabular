@@ -1018,7 +1018,12 @@ def main() -> None:
         print(df)
 
     else:
-        print("Please specify an experiment tier or run configuration. Use --help, --resource_report, or python main.py --all.")
+        print("\n=================================================================")
+        print("          CCR-TABULAR AUTOMATED MASTER BENCHMARK RUNNER          ")
+        print("=================================================================\n")
+        print("No specific tier specified. Defaulting to full automatic Core-10 benchmark.")
+        from experiments.run_tier1_benchmark import run_tier1_benchmark
+        run_tier1_benchmark(device_override=args.device, fast_mode=fast_mode)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,9 @@ def run_tier1_benchmark(
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     generate_experiment_manifest(OUTPUTS_FINAL_MASTER)
 
+    from src.data.load_data import ensure_all_datasets_cached
+    ensure_all_datasets_cached(datasets)
+
     logger.info(f"Starting Tier 1 Master Benchmark on 10 Core Datasets: {datasets}...")
     logger.info(f"Target Output CSV: {out_csv}")
 

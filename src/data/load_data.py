@@ -8,7 +8,7 @@ Automatically drops zero-variance/constant features with zero information loss.
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,23 @@ logger = logging.getLogger(__name__)
 
 _DOWNLOAD_RETRIES = 3
 _RETRY_DELAY_SECONDS = 5
+
+
+def ensure_all_datasets_cached(datasets: Optional[List[str]] = None) -> None:
+    """Verify all specified datasets exist in data/raw/, automatically downloading missing ones from OpenML."""
+    from src.utils.config import CORE_10_DATASETS
+    target_datasets = datasets or CORE_10_DATASETS
+    logger.info("=================================================================")
+    logger.info("       CHECKING / DOWNLOADING REQUIRED BENCHMARK DATASETS        ")
+    logger.info("=================================================================")
+    for ds_name in target_datasets:
+        csv_path = DATA_RAW / f"{ds_name}.csv"
+        if not csv_path.exists():
+            logger.info(f"  [DOWNLOADING] '{ds_name}' from OpenML...")
+        else:
+            logger.info(f"  [READY] '{ds_name}' exists in local cache ({csv_path.name}).")
+        load_dataset(ds_name)
+    logger.info("=================================================================\n")
 
 
 def load_dataset(name: str, force_download: bool = False) -> pd.DataFrame:

@@ -127,13 +127,16 @@ def train_one_fold(
         )
     else:
         model, best_metrics = _train_neural_model(
-            model_name=model_name,
+            loss_name=model_name,
+            architecture=architecture,
             dataset_name=dataset_name,
             X_train=X_train,
             y_train=y_train,
             X_val=X_val,
             y_val=y_val,
-            architecture=architecture,
+            seed=seed,
+            run_id=run_id,
+            run_logger=run_logger,
             optimizer_name=optimizer_name,
             lr=lr,
             weight_decay=weight_decay,
@@ -141,7 +144,6 @@ def train_one_fold(
             beta=beta,
             K_hist=K_hist,
             instrument_batch=instrument_batch,
-            run_id=run_id,
             clean_y_train=clean_y_train,
             batch_size=batch_size,
             device=device,

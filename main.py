@@ -407,6 +407,9 @@ def main() -> None:
     parser.add_argument("--canonical", action="store_true", help="Consolidate canonical master results store.")
     parser.add_argument("--smoke_test", action="store_true", help="Run quick 2-fold diagnostic smoke test.")
 
+    parser.add_argument("--fast", action="store_true", help="High-efficiency execution mode with in-memory fold caching and minimal telemetry.")
+    parser.add_argument("--safe", action="store_true", help="Safe execution mode with verbose telemetry and conservative batching.")
+
     parser.add_argument("--dataset", type=str, default=None, help="Dataset name.")
     parser.add_argument("--model", type=str, default=None, help="Model or loss name.")
     parser.add_argument("--noise_type", type=str, default="none", help="Noise type.")

@@ -77,7 +77,7 @@ def evaluate_model(
     }
 
     append_results(results_row, target_csv)
-    return metrics
+    return results_row
 
 
 def append_results(results_row: Dict, results_path: Path) -> None:

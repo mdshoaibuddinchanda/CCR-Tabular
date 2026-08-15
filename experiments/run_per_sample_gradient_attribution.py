@@ -254,7 +254,7 @@ def plot_gradient_attribution_figure(
     if len(sub_samples) == 0:
         sub_samples = df_samples.copy()
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5), dpi=300)
+    fig, axes = plt.subplots(1, 4, figsize=(22, 5), dpi=300)
 
     # ── Panel A: Confidence vs Sample Weight (Clean vs Corrupted under CCR) ──
     ccr_sub = sub_samples[sub_samples["model"] == "ccr"]
@@ -269,9 +269,9 @@ def plot_gradient_attribution_figure(
             s=25,
             ax=axes[0],
         )
-        axes[0].set_title("(a) Observed Confidence vs. Weight ($w_i$)\n[CCR on Phoneme @ 40% Noise]", fontsize=12, fontweight="bold")
-        axes[0].set_xlabel("Observed Label Probability $p_y$", fontsize=11)
-        axes[0].set_ylabel("Normalized Sample Weight $\\hat{w}_i$", fontsize=11)
+        axes[0].set_title("(a) Observed Confidence vs. Weight ($w_i$)\n[CCR on Phoneme @ 40% Noise]", fontsize=11, fontweight="bold")
+        axes[0].set_xlabel("Observed Label Probability $p_y$", fontsize=10)
+        axes[0].set_ylabel("Normalized Sample Weight $\\hat{w}_i$", fontsize=10)
         handles, labels = axes[0].get_legend_handles_labels()
         axes[0].legend(handles=handles, labels=["Clean Label", "Corrupted Label"], loc="upper right")
         axes[0].grid(True, linestyle="--", alpha=0.5)
@@ -288,9 +288,9 @@ def plot_gradient_attribution_figure(
             s=25,
             ax=axes[1],
         )
-        axes[1].set_title("(b) Confidence vs. Effective Gradient Mass ($w_i ||g_i||$)\n[CCR on Phoneme @ 40% Noise]", fontsize=12, fontweight="bold")
-        axes[1].set_xlabel("Observed Label Probability $p_y$", fontsize=11)
-        axes[1].set_ylabel("Effective Gradient Norm $w_i ||g_i||_2$", fontsize=11)
+        axes[1].set_title("(b) Confidence vs. Effective Gradient Mass\n[CCR on Phoneme @ 40% Noise]", fontsize=11, fontweight="bold")
+        axes[1].set_xlabel("Observed Label Probability $p_y$", fontsize=10)
+        axes[1].set_ylabel("Effective Gradient Norm $w_i ||g_i||_2$", fontsize=10)
         handles, labels = axes[1].get_legend_handles_labels()
         axes[1].legend(handles=handles, labels=["Clean Label", "Corrupted Label"], loc="upper right")
         axes[1].grid(True, linestyle="--", alpha=0.5)
@@ -312,16 +312,38 @@ def plot_gradient_attribution_figure(
             palette=colors,
             ax=axes[2],
         )
-        axes[2].set_title("(c) Corrupted Gradient Mass Fraction ($R_{\\mathrm{noise}}$)\n[All Datasets @ 40% Noise]", fontsize=12, fontweight="bold")
-        axes[2].set_xlabel("Loss Formulation", fontsize=11)
-        axes[2].set_ylabel("Fraction of Total Gradient Mass $R_{\\mathrm{noise}}$", fontsize=11)
+        axes[2].set_title("(c) Corrupted Gradient Mass ($R_{\\mathrm{noise}}$)\n[All Datasets @ 40% Noise]", fontsize=11, fontweight="bold")
+        axes[2].set_xlabel("Loss Formulation", fontsize=10)
+        axes[2].set_ylabel("Fraction of Total Gradient Mass $R_{\\mathrm{noise}}$", fontsize=10)
         axes[2].set_ylim(0, max(0.5, grouped_r["R_noise"].max() * 1.2))
         axes[2].grid(True, linestyle="--", alpha=0.5, axis="y")
+
+    # ── Panel D: Lorenz Gradient-Mass Concentration Curve ──
+    ax_lorenz = axes[3]
+    lorenz_models = ["ce", "wce", "focal", "dynamic_ce", "ccr"]
+    lorenz_palette = {"ce": "#7f7f7f", "wce": "#ff7f0e", "focal": "#1f77b4", "dynamic_ce": "#9467bd", "ccr": "#2ca02c"}
+
+    for mod in lorenz_models:
+        mod_samples = sub_samples[sub_samples["model"] == mod]
+        if len(mod_samples) > 0:
+            grads = np.sort(mod_samples["weighted_grad"].values)
+            cum_grads = np.cumsum(grads)
+            if cum_grads[-1] > 0:
+                cum_grads /= cum_grads[-1]
+            x_frac = np.linspace(0, 1, len(grads))
+            ax_lorenz.plot(x_frac, cum_grads, label=mod.upper(), color=lorenz_palette.get(mod, "#333333"), linewidth=2.0)
+
+    ax_lorenz.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Uniform (y = x)")
+    ax_lorenz.set_title("(d) Gradient-Mass Concentration (Lorenz Curve)\n[Learning Signal Redistribution]", fontsize=11, fontweight="bold")
+    ax_lorenz.set_xlabel("Cumulative Fraction of Samples", fontsize=10)
+    ax_lorenz.set_ylabel("Cumulative Fraction of Gradient Mass", fontsize=10)
+    ax_lorenz.legend(loc="upper left", fontsize=9)
+    ax_lorenz.grid(True, linestyle="--", alpha=0.5)
 
     plt.tight_layout()
     plt.savefig(out_png, dpi=300)
     plt.close()
-    logger.info(f"Saved Figure 5 to {out_png}")
+    logger.info(f"Saved 4-Panel Figure 5 to {out_png}")
     return out_png
 
 

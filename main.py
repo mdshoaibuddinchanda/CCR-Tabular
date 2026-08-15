@@ -1,30 +1,24 @@
-"""CCR-Tabular — Master Centralized Resource-Aware Execution Orchestrator.
+"""CCR-Tabular — Master Heterogeneous Resource-Aware Execution Orchestrator.
 
-Centralized execution layer controlling CPU core reservation, dynamic GPU VRAM budgeting,
-micro-batch scaling, OOM recovery, and sequential experiment workflows.
+Centralized execution layer controlling:
+  - CPU process pooling capped at (logical_cores - 3) with 1 BLAS thread per worker.
+  - GPU single-slot execution with runtime dynamic VRAM query (20% headroom).
+  - Heterogeneous job routing (CPU-first for GBDT/Stats, GPU-first for Neural Networks).
+  - Dynamic micro-batch scaling and OOM recovery with batch size caching.
+  - Automatic FP16 AMP mixed precision on CUDA.
+  - In-memory fold preprocessing caching to eliminate disk/compute bottlenecks.
 
 Usage:
-    # ── Diagnostics & Resource Auditing ────────────────────────────────────────
-    python main.py --resource_report    # Audit CPU logical cores, GPU free/safe VRAM, AMP
-    python main.py --validate           # Automated scientific consistency checks
-    python main.py --dry_run            # Preview execution plan and worker allocations
-    python main.py --smoke_test         # Rapid 5-second diagnostic verification
+    # ── System Diagnostics & Audits ────────────────────────────────────────────
+    python main.py --resource_report    # Audit logical cores, VRAM headroom, AMP
+    python main.py --validate           # Automated 5-point scientific consistency check
+    python main.py --dry_run            # Preview execution matrix and device routing
+    python main.py --smoke_test         # 5-second diagnostic verification
 
-    # ── Unified Master Suite (1-Go Execution with Checkpoint Resumption) ───────
-    python main.py --all
-
-    # ── Benchmark Tiers ────────────────────────────────────────────────────────
-    python main.py --tier1              # Tier 1: Core 10-Dataset Master Benchmark
-    python main.py --tier2              # Tier 2: Direct Mechanism & Batch Telemetry
-    python main.py --pure_controls      # Pure Normalization Controls
-    python main.py --attribution        # Per-Sample Gradient Attribution (Figure 5)
-    python main.py --optimizer_study    # Optimizer Comparison (SGD vs Adam vs AdamW)
-    python main.py --tier3              # Tier 3: Architecture Transfer (MLP/ResNet/FT-Transformer)
-    python main.py --tier4              # Tier 4: Multiclass Benchmark (Segment & Vehicle)
-    python main.py --tier5              # Tier 5: Real-World External Validation (Heart & Cancer)
-    python main.py --tier6              # Tier 6: Synthetic Toy & Negative Controls
-    python main.py --sb_investigation   # Theoretical Bounds & Empirical S/B Distributions
-    python main.py --canonical          # Consolidate Canonical Results Store
+    # ── High-Throughput Execution Modes ────────────────────────────────────────
+    python main.py --all --fast         # Run full benchmark in optimized fast mode
+    python main.py --tier1 --fast       # Run Tier 1 Core-10 benchmark in fast mode
+    python main.py --tier3 --fast       # Run Tier 3 Architecture Transfer (MLP/ResNet/FT-Transformer)
 """
 
 import os
@@ -61,13 +55,16 @@ from src.utils.config import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("CCR-ResourceController")
+logger = logging.getLogger("CCR-Scheduler")
 
 # Resource Management Constants
 CPU_RESERVED_CORES: int = 3
 GPU_SAFETY_FRACTION: float = 0.80
 GPU_MIN_FREE_MB: int = 1024
 MAX_OOM_RETRIES: int = 3
+
+# Cache for discovered optimal batch sizes per (model_type, dataset_scale)
+_BATCH_SIZE_CACHE: Dict[Tuple[str, str], int] = {}
 
 
 # ── System Resource Profiling ──────────────────────────────────────────────────
@@ -78,9 +75,9 @@ def get_cpu_worker_budget() -> int:
     return max(1, logical_cores - CPU_RESERVED_CORES)
 
 
-def get_gpu_resource_profile() -> Dict[str, Any]:
+def get_gpu_resource_profile(device_override: str = "auto") -> Dict[str, Any]:
     """Query runtime GPU state, free VRAM, and compute safe working budget."""
-    if not torch.cuda.is_available():
+    if device_override == "cpu" or not torch.cuda.is_available():
         return {
             "cuda_available": False,
             "device": "cpu",
@@ -97,8 +94,7 @@ def get_gpu_resource_profile() -> Dict[str, Any]:
         free_mb = int(free_bytes / (1024 * 1024))
         safe_mb = int(free_mb * GPU_SAFETY_FRACTION)
 
-        # Require minimum headroom
-        use_gpu = safe_mb >= GPU_MIN_FREE_MB
+        use_gpu = (device_override == "cuda") or (safe_mb >= GPU_MIN_FREE_MB)
         return {
             "cuda_available": True,
             "device": "cuda" if use_gpu else "cpu",
@@ -109,7 +105,7 @@ def get_gpu_resource_profile() -> Dict[str, Any]:
             "amp_enabled": use_gpu,
         }
     except Exception as e:
-        logger.warning(f"Unable to query CUDA memory: {e}. Falling back to standard CPU/GPU mode.")
+        logger.warning(f"Unable to query CUDA memory: {e}. Falling back to standard device detection.")
         return {
             "cuda_available": True,
             "device": "cuda",
@@ -121,25 +117,14 @@ def get_gpu_resource_profile() -> Dict[str, Any]:
         }
 
 
-def scale_workers_for_dataset(n_samples: int) -> int:
-    """Scale CPU workers dynamically to avoid IPC overhead on small datasets."""
-    max_workers = get_cpu_worker_budget()
-    if n_samples < 2000:
-        return min(2, max_workers)
-    elif n_samples <= 10000:
-        return min(4, max_workers)
-    else:
-        return max_workers
-
-
 def print_resource_report() -> None:
     """Print comprehensive hardware and resource budget report."""
     logical_cores = os.cpu_count() or 4
     usable_workers = get_cpu_worker_budget()
-    gpu_prof = get_gpu_resource_profile()
+    gpu_prof = get_gpu_resource_profile("auto")
 
     print("\n=================================================================")
-    print("           CCR-TABULAR HARDWARE & RESOURCE AUDIT REPORT          ")
+    print("      CCR-TABULAR HETEROGENEOUS RESOURCE AUDIT REPORT           ")
     print("=================================================================")
     print("CPU Subsystem:")
     print(f"  Logical Cores:        {logical_cores}")
@@ -157,7 +142,7 @@ def print_resource_report() -> None:
     print("=================================================================\n")
 
 
-# ── Execution with OOM Protection & Checkpointing ──────────────────────────────
+# ── Heterogeneous Job Execution Engine ─────────────────────────────────────────
 
 def execute_safe_cross_validation(
     dataset_name: str,
@@ -168,15 +153,19 @@ def execute_safe_cross_validation(
     seeds: Optional[List[int]] = None,
     n_folds: int = N_FOLDS,
     instrument_batch: bool = False,
+    device_mode: str = "auto",
+    fast_mode: bool = True,
 ) -> Optional[Any]:
-    """Execute cross validation with automatic batch scaling and OOM fallback."""
+    """Execute cross-validation with heterogeneous routing, dynamic batch scaling, and OOM recovery."""
     from src.training.cross_validation import run_cross_validation
 
-    gpu_prof = get_gpu_resource_profile()
+    gpu_prof = get_gpu_resource_profile(device_mode)
     target_device = torch.device(gpu_prof["device"])
     use_amp = gpu_prof["amp_enabled"]
 
-    base_batch_size = BATCH_SIZE
+    # Retrieve cached batch size if available
+    cache_key = (f"{architecture}_{model_name}", dataset_name)
+    base_batch_size = _BATCH_SIZE_CACHE.get(cache_key, BATCH_SIZE)
     retries = 0
 
     while retries <= MAX_OOM_RETRIES:
@@ -186,7 +175,7 @@ def execute_safe_cross_validation(
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            return run_cross_validation(
+            df_out = run_cross_validation(
                 dataset_name=dataset_name,
                 model_name=model_name,
                 noise_type=noise_type,
@@ -194,42 +183,48 @@ def execute_safe_cross_validation(
                 architecture=architecture,
                 seeds=seeds or SEEDS,
                 n_folds=n_folds,
-                instrument_batch=instrument_batch,
+                instrument_batch=instrument_batch and not fast_mode,
                 batch_size=base_batch_size,
                 device=target_device,
                 use_amp=use_amp,
             )
 
+            # Record successful batch size
+            _BATCH_SIZE_CACHE[cache_key] = base_batch_size
+            return df_out
+
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if "out of memory" in str(e).lower() or isinstance(e, torch.cuda.OutOfMemoryError):
                 retries += 1
+                new_batch = max(16, base_batch_size // 2)
                 logger.warning(
-                    f"CUDA OOM on {dataset_name}-{model_name} (Attempt {retries}/{MAX_OOM_RETRIES}). "
-                    f"Clearing cache and reducing batch size ({base_batch_size} -> {base_batch_size // 2})."
+                    f"CUDA OOM on [{dataset_name}-{model_name}-{architecture}] (Attempt {retries}/{MAX_OOM_RETRIES}). "
+                    f"Clearing cache and scaling batch size: {base_batch_size} -> {new_batch}."
                 )
                 if torch.cuda.is_available():
                     gc.collect()
                     torch.cuda.empty_cache()
 
-                base_batch_size = max(16, base_batch_size // 2)
+                base_batch_size = new_batch
+                _BATCH_SIZE_CACHE[cache_key] = base_batch_size
 
                 if retries > MAX_OOM_RETRIES:
-                    logger.warning("Exceeded maximum OOM retries on GPU. Falling back to CPU.")
+                    logger.warning(f"Exceeded maximum OOM retries on GPU for {dataset_name}. Falling back to CPU.")
                     target_device = torch.device("cpu")
                     use_amp = False
             else:
-                logger.error(f"Execution failed on {dataset_name}-{model_name}: {e}")
+                logger.error(f"Execution error on {dataset_name}-{model_name}: {e}")
                 raise e
 
 
 # ── Dry Run Planner ────────────────────────────────────────────────────────────
 
-def run_dry_run_planner(target_tiers: List[str]) -> None:
+def run_dry_run_planner(target_tiers: List[str], device_mode: str = "auto") -> None:
     """Preview job matrix, memory budgets, and worker allocations without execution."""
     print("\n=================================================================")
-    print("                 CCR-TABULAR DRY RUN EXECUTION PLAN              ")
+    print("         CCR-TABULAR HETEROGENEOUS DRY RUN EXECUTION PLAN        ")
     print("=================================================================")
-    gpu_prof = get_gpu_resource_profile()
+    gpu_prof = get_gpu_resource_profile(device_mode)
     cpu_budget = get_cpu_worker_budget()
 
     print(f"Target Device: {gpu_prof['device'].upper()} | Safe VRAM: {gpu_prof['safe_vram_mb']} MB | CPU Workers: {cpu_budget}")
@@ -242,16 +237,15 @@ def run_dry_run_planner(target_tiers: List[str]) -> None:
             print("  Losses (8):    ['ce', 'wce', 'focal', 'gce', 'sce', 'elr', 'ccr_no_norm', 'ccr']")
             print("  Noise (4):     Clean (0%), 20% Asym, 40% Asym, 20% Sym")
             print("  Folds/Seeds:   3 Folds x 2 Seeds = 6 runs/condition")
-            print("  Concurrency:   1 GPU Worker (Sequential on CUDA to avoid contention)")
+            print("  Routing:       GPU-First Queue (1 Dedicated GPU Slot, FP16 AMP)")
         elif tier == "tier3":
             print("\nTier 3: Architecture Transferability Benchmark")
             print("  Datasets (5):  ['adult', 'bank', 'phoneme', 'spambase', 'credit_g']")
-            print("  Models:        ['TabularMLP', 'TabularResNet', 'TabularFTTransformer']")
-            print("  Losses (2):    ['ce', 'ccr']")
+            print("  Architectures: ['TabularMLP', 'TabularResNet', 'TabularFTTransformer']")
+            print("  Routing:       GPU-First Queue (FP16 AMP)")
         elif tier == "tier4":
             print("\nTier 4: Multiclass Transfer Benchmark (C >= 3)")
             print("  Datasets (2):  ['segment' (C=7), 'vehicle' (C=4)]")
-            print("  Losses (8):    ['ce', 'wce', 'focal', 'gce', 'sce', 'elr', 'ccr_no_norm', 'ccr']")
         elif tier == "tier5":
             print("\nTier 5: Real-World Clinical External Validation")
             print("  Datasets (2):  ['heart_disease', 'breast_cancer']")
@@ -260,8 +254,8 @@ def run_dry_run_planner(target_tiers: List[str]) -> None:
 
 # ── Unified 1-Go Master Runner ─────────────────────────────────────────────────
 
-def run_all_experiments() -> None:
-    """Execute all benchmark tiers and analyses sequentially in one unified workflow."""
+def run_all_experiments(device_mode: str = "auto", fast_mode: bool = True) -> None:
+    """Execute all benchmark tiers sequentially in one optimized workflow."""
     logger.info("=================================================================")
     logger.info("        STARTING UNIFIED 1-GO CCR-TABULAR MASTER SUITE          ")
     logger.info("=================================================================")
@@ -369,15 +363,17 @@ def run_all_experiments() -> None:
     except Exception as e:
         logger.error(f"Error in Tier 1: {e}")
 
-    # Final Canonical Consolidation & Verification
-    logger.info(">>> Consolidating Canonical Master Results Store & Running Statistical Tests...")
+    # Final Canonical Consolidation, Figures & Verification
+    logger.info(">>> Consolidating Canonical Master Results Store & Generating Figures...")
     try:
         from src.analysis.generate_canonical_results import build_canonical_results_store
         build_canonical_results_store()
+        from src.analysis.generate_paper_figures import generate_all_figures
+        generate_all_figures()
         from src.analysis.final_validation import run_scientific_validation
         run_scientific_validation()
     except Exception as e:
-        logger.error(f"Error in Canonical Consolidation: {e}")
+        logger.error(f"Error in Final Consolidation: {e}")
 
     logger.info("=================================================================")
     logger.info("   UNIFIED 1-GO CCR-TABULAR SUITE EXECUTION SUCCESSFULLY FINISHED ")
@@ -387,7 +383,7 @@ def run_all_experiments() -> None:
 # ── Main Entry Point ───────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CCR-Tabular Master Resource-Aware Experiment Runner")
+    parser = argparse.ArgumentParser(description="CCR-Tabular Master Heterogeneous Experiment Runner")
     parser.add_argument("--resource_report", action="store_true", help="Print hardware audit and worker budgets.")
     parser.add_argument("--validate", action="store_true", help="Run automated scientific consistency validator.")
     parser.add_argument("--dry_run", action="store_true", help="Inspect execution plan without computing.")
@@ -405,10 +401,12 @@ def main() -> None:
     parser.add_argument("--optimizer_study", action="store_true", help="Run SGD vs Adam vs AdamW comparison.")
     parser.add_argument("--compute_benchmark", action="store_true", help="Run computational cost & VRAM profiling.")
     parser.add_argument("--canonical", action="store_true", help="Consolidate canonical master results store.")
+    parser.add_argument("--figures", action="store_true", help="Generate all publication and supplementary figures.")
     parser.add_argument("--smoke_test", action="store_true", help="Run quick 2-fold diagnostic smoke test.")
 
-    parser.add_argument("--fast", action="store_true", help="High-efficiency execution mode with in-memory fold caching and minimal telemetry.")
-    parser.add_argument("--safe", action="store_true", help="Safe execution mode with verbose telemetry and conservative batching.")
+    parser.add_argument("--fast", action="store_true", default=True, help="High-efficiency execution mode (in-memory fold caching, FP16 AMP).")
+    parser.add_argument("--safe", action="store_true", help="Conservative execution mode.")
+    parser.add_argument("--device", type=str, choices=["auto", "cpu", "cuda"], default="auto", help="Device execution target.")
 
     parser.add_argument("--dataset", type=str, default=None, help="Dataset name.")
     parser.add_argument("--model", type=str, default=None, help="Model or loss name.")
@@ -418,6 +416,7 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 2024], help="Random seeds.")
 
     args = parser.parse_args()
+    fast_mode = not args.safe
 
     if args.resource_report:
         print_resource_report()
@@ -426,12 +425,16 @@ def main() -> None:
         from src.analysis.final_validation import run_scientific_validation
         run_scientific_validation()
 
+    elif args.figures:
+        from src.analysis.generate_paper_figures import generate_all_figures
+        generate_all_figures()
+
     elif args.dry_run:
         target = ["tier1", "tier3", "tier4", "tier5"]
-        run_dry_run_planner(target)
+        run_dry_run_planner(target, device_mode=args.device)
 
     elif args.all:
-        run_all_experiments()
+        run_all_experiments(device_mode=args.device, fast_mode=fast_mode)
 
     elif args.tier6:
         from experiments.run_tier6_toy_controls import (
@@ -520,7 +523,7 @@ def main() -> None:
                 noise_rate=args.noise_rate,
                 seeds=[42],
                 n_folds=2,
-                instrument_batch=True,
+                instrument_batch=False,
             )
             results.append(df)
         all_res = pd.concat(results, ignore_index=True)
@@ -537,7 +540,7 @@ def main() -> None:
             noise_rate=args.noise_rate,
             seeds=args.seeds,
             n_folds=args.n_folds,
-            instrument_batch=True,
+            instrument_batch=False,
         )
         print(df)
 

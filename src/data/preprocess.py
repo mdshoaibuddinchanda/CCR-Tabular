@@ -1,7 +1,7 @@
 """Preprocessing pipeline for CCR-Tabular.
 
 CRITICAL: No data leakage. Scalers, encoders, and imputers are ALWAYS fit
-on the training fold only and applied (transform-only) to val/test.
+on the training fold only and applied (transform-only) to val/test splits.
 """
 
 import logging
@@ -23,29 +23,17 @@ def build_preprocessor(X_train: pd.DataFrame) -> ColumnTransformer:
     Pipeline:
         - Numerical columns: SimpleImputer(strategy='median') + StandardScaler()
         - Categorical columns: SimpleImputer(strategy='most_frequent') + OrdinalEncoder()
-
-    Args:
-        X_train: Training features DataFrame. Preprocessor is fit ONLY on this.
-
-    Returns:
-        Fitted sklearn ColumnTransformer. Apply to val/test with .transform() only.
-
-    Note:
-        Never call fit() or fit_transform() on val/test data. Ever.
     """
     numerical_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
     categorical_cols = X_train.select_dtypes(exclude=["number"]).columns.tolist()
 
-    logger.info(
-        f"Building preprocessor: {len(numerical_cols)} numerical cols, "
-        f"{len(categorical_cols)} categorical cols."
-    )
-
     transformers = []
 
     if numerical_cols:
+        from sklearn.feature_selection import VarianceThreshold
         num_pipeline = Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
+            ("variance_thresh", VarianceThreshold(threshold=0.0)),
             ("scaler", StandardScaler()),
         ])
         transformers.append(("numerical", num_pipeline, numerical_cols))
@@ -61,20 +49,11 @@ def build_preprocessor(X_train: pd.DataFrame) -> ColumnTransformer:
         transformers.append(("categorical", cat_pipeline, categorical_cols))
 
     if not transformers:
-        raise ValueError(
-            "X_train has no columns to preprocess. "
-            "Check that the DataFrame is not empty."
-        )
+        raise ValueError("X_train has no columns to preprocess.")
 
     preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
     preprocessor.fit(X_train)
-
-    # Record training size for leakage detection in tests
     preprocessor._train_n_samples = len(X_train)
-
-    logger.info(
-        f"Preprocessor fitted on {len(X_train)} training samples."
-    )
     return preprocessor
 
 
@@ -85,31 +64,13 @@ def preprocess_split(
     y_train: pd.Series,
     y_val: pd.Series,
     y_test: pd.Series,
+    allow_multiclass: bool = False,
 ) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray,
     np.ndarray, np.ndarray, np.ndarray,
     ColumnTransformer,
 ]:
-    """Full preprocessing pipeline. Fit on train, transform all splits.
-
-    Args:
-        X_train: Training features.
-        X_val: Validation features.
-        X_test: Test features.
-        y_train: Training labels.
-        y_val: Validation labels.
-        y_test: Test labels.
-
-    Returns:
-        Tuple of (X_train_np, X_val_np, X_test_np,
-                  y_train_np, y_val_np, y_test_np,
-                  fitted_preprocessor).
-
-    Raises:
-        AssertionError: If X_val or X_test have different columns than X_train.
-        AssertionError: If y_train does not have exactly 2 unique classes.
-    """
-    # ── Column alignment assertions ───────────────────────────────────────────
+    """Full preprocessing pipeline: Fit on train ONLY, transform all splits."""
     assert X_val.columns.tolist() == X_train.columns.tolist(), (
         "Val and train columns must match — check for data leakage. "
         f"Train cols: {X_train.columns.tolist()}, "
@@ -120,15 +81,20 @@ def preprocess_split(
         f"Train cols: {X_train.columns.tolist()}, "
         f"Test cols: {X_test.columns.tolist()}"
     )
-    assert len(np.unique(y_train)) == 2, (
-        f"Binary classification only — target must have exactly 2 classes. "
-        f"Got: {np.unique(y_train).tolist()}"
-    )
 
-    # ── Fit on train ONLY ─────────────────────────────────────────────────────
+    n_classes = len(np.unique(y_train))
+    if not allow_multiclass:
+        assert n_classes == 2, (
+            f"Binary classification only — target must have exactly 2 classes. "
+            f"Got: {np.unique(y_train).tolist()}"
+        )
+    else:
+        assert n_classes >= 2, f"Target must have >= 2 classes. Got: {n_classes}."
+
+    # Fit preprocessor on train ONLY
     preprocessor = build_preprocessor(X_train)
 
-    # ── Transform all splits (no fitting on val/test) ─────────────────────────
+    # Transform all splits
     X_train_np = preprocessor.transform(X_train).astype(np.float32)
     X_val_np = preprocessor.transform(X_val).astype(np.float32)
     X_test_np = preprocessor.transform(X_test).astype(np.float32)
@@ -137,28 +103,8 @@ def preprocess_split(
     y_val_np = np.array(y_val, dtype=np.int64)
     y_test_np = np.array(y_test, dtype=np.int64)
 
-    logger.info(
-        f"Preprocessing complete: "
-        f"train={X_train_np.shape}, val={X_val_np.shape}, test={X_test_np.shape}"
-    )
-
     return (
         X_train_np, X_val_np, X_test_np,
         y_train_np, y_val_np, y_test_np,
         preprocessor,
     )
-
-
-def get_feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    """Return numerical and categorical column names (excluding 'target').
-
-    Args:
-        df: DataFrame with a 'target' column.
-
-    Returns:
-        Tuple of (numerical_cols, categorical_cols).
-    """
-    feature_df = df.drop(columns=["target"], errors="ignore")
-    numerical_cols = feature_df.select_dtypes(include=["number"]).columns.tolist()
-    categorical_cols = feature_df.select_dtypes(exclude=["number"]).columns.tolist()
-    return numerical_cols, categorical_cols

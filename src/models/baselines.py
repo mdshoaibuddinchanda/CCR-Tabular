@@ -1,14 +1,16 @@
-"""Baseline models for CCR-Tabular experiments.
+"""Baseline models and neural architecture factory for CCR-Tabular experiments.
 
-All baselines implement a unified interface compatible with the training
-and evaluation pipeline. MLP baselines use the same architecture as CCR.
+Supports:
+  1. Neural architectures: TabularMLP, TabularResNet, TabularFTTransformer
+  2. Neural baselines with arbitrary loss functions (CE, WCE, Focal, GCE, SCE, ELR, CCR, Norm-losses)
+  3. GBDT models: XGBoost (default & weighted), LightGBM (default)
 """
 
 import logging
 import pickle
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -17,9 +19,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.models.mlp import TabularDataset, TabularMLP, get_mlp_for_dataset
+from src.models.resnet import TabularResNet
+from src.models.transformer import TabularFTTransformer
 from src.utils.config import (
     BATCH_SIZE,
     EARLY_STOP_PATIENCE,
+    GRAD_CLIP_NORM,
     LEARNING_RATE,
     MAX_EPOCHS,
     WEIGHT_DECAY,
@@ -29,13 +34,42 @@ from src.utils.reproducibility import get_device
 logger = logging.getLogger(__name__)
 
 
-# ── Abstract base ─────────────────────────────────────────────────────────────
+def build_neural_model(
+    architecture: str,
+    input_dim: int,
+    num_classes: int = 2,
+    dataset_name: Optional[str] = None,
+    dropout: float = 0.3,
+) -> nn.Module:
+    """Factory function for neural architectures.
+
+    Args:
+        architecture: 'mlp', 'resnet', or 'ft_transformer' / 'transformer'.
+        input_dim: Number of input features.
+        num_classes: Number of target classes.
+        dataset_name: Dataset name for MLP scaling heuristic.
+        dropout: Dropout rate.
+
+    Returns:
+        Instantiated nn.Module.
+    """
+    arch = architecture.lower().strip()
+    if arch == "mlp":
+        if dataset_name is not None:
+            return get_mlp_for_dataset(dataset_name, input_dim, num_classes=num_classes)
+        return TabularMLP(input_dim=input_dim, num_classes=num_classes, dropout=dropout)
+    elif arch in ("resnet", "tabular_resnet"):
+        return TabularResNet(input_dim=input_dim, num_classes=num_classes, dropout=dropout)
+    elif arch in ("ft_transformer", "transformer", "fttransformer"):
+        return TabularFTTransformer(input_dim=input_dim, num_classes=num_classes, dropout=dropout)
+    else:
+        raise ValueError(
+            f"Unknown architecture '{architecture}'. Valid options: ['mlp', 'resnet', 'ft_transformer']."
+        )
+
 
 class BaselineModel(ABC):
-    """Abstract base class for all CCR-Tabular baseline models.
-
-    All baselines must implement fit, predict, predict_proba, save, and load.
-    """
+    """Abstract base class for all CCR-Tabular baseline models."""
 
     @abstractmethod
     def fit(
@@ -45,270 +79,53 @@ class BaselineModel(ABC):
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None,
     ) -> None:
-        """Train the model.
-
-        Args:
-            X_train: Training features.
-            y_train: Training labels.
-            X_val: Optional validation features for early stopping.
-            y_val: Optional validation labels.
-        """
+        """Fit model on training fold."""
 
     @abstractmethod
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Return hard class predictions.
-
-        Args:
-            X: Feature array, shape [N, F].
-
-        Returns:
-            Predicted class indices, shape [N].
-        """
+        """Predict hard class labels."""
 
     @abstractmethod
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Return class probabilities.
-
-        Args:
-            X: Feature array, shape [N, F].
-
-        Returns:
-            Probability array, shape [N, 2].
-        """
+        """Predict class probabilities."""
 
     @abstractmethod
     def save(self, path: Path) -> None:
-        """Save model to disk.
-
-        Args:
-            path: Destination file path.
-        """
+        """Save model checkpoint."""
 
     @classmethod
     @abstractmethod
     def load(cls, path: Path) -> "BaselineModel":
-        """Load model from disk.
-
-        Args:
-            path: Source file path.
-
-        Returns:
-            Loaded model instance.
-        """
+        """Load model checkpoint."""
 
 
-# ── MLP training helper ───────────────────────────────────────────────────────
+# ── Generic Neural Baseline Wrapper ───────────────────────────────────────────
 
-def _train_mlp(
-    model: TabularMLP,
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_val: Optional[np.ndarray],
-    y_val: Optional[np.ndarray],
-    loss_fn: nn.Module,
-    seed: int = 42,
-) -> TabularMLP:
-    """Generic MLP training loop with early stopping on macro F1.
-
-    Args:
-        model: TabularMLP instance.
-        X_train: Training features.
-        y_train: Training labels.
-        X_val: Validation features (optional).
-        y_val: Validation labels (optional).
-        loss_fn: Loss function module.
-        seed: Random seed.
-
-    Returns:
-        Trained model with best validation weights loaded.
-    """
-    from sklearn.metrics import f1_score
-
-    device = get_device()
-    model = model.to(device)
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-    )
-
-    train_dataset = TabularDataset(X_train, y_train)
-    train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False
-    )
-
-    best_val_f1 = -1.0
-    patience_counter = 0
-    best_state: Optional[dict] = None
-
-    for epoch in range(MAX_EPOCHS):
-        # ── Training ──────────────────────────────────────────────────────────
-        model.train()
-        for X_batch, y_batch, _ in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            optimizer.zero_grad()
-            logits = model(X_batch)
-            loss = loss_fn(logits, y_batch)
-            if torch.isnan(loss):
-                logger.warning(f"NaN loss at epoch {epoch + 1}. Stopping training.")
-                break
-            loss.backward()
-            optimizer.step()
-
-        # ── Validation ────────────────────────────────────────────────────────
-        if X_val is not None and y_val is not None:
-            model.eval()
-            with torch.no_grad():
-                X_val_t = torch.FloatTensor(X_val).to(device)
-                logits_val = model(X_val_t)
-                y_pred = logits_val.argmax(dim=1).cpu().numpy()
-
-            val_f1 = float(f1_score(y_val, y_pred, average="macro", zero_division=0))
-
-            if val_f1 > best_val_f1:
-                best_val_f1 = val_f1
-                patience_counter = 0
-                best_state = {k: v.clone() for k, v in model.state_dict().items()}
-            else:
-                patience_counter += 1
-                if patience_counter >= EARLY_STOP_PATIENCE:
-                    logger.info(f"Early stopping at epoch {epoch + 1}.")
-                    break
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    return model
-
-
-# ── B1: Standard cross-entropy MLP ───────────────────────────────────────────
-
-class MLPStandardBaseline(BaselineModel):
-    """MLP with standard cross-entropy loss (Baseline B1).
-
-    Args:
-        dataset_name: Dataset key for architecture selection.
-        input_dim: Number of input features.
-        seed: Random seed.
-    """
-
-    def __init__(self, dataset_name: str, input_dim: int, seed: int = 42) -> None:
-        self.dataset_name = dataset_name
-        self.input_dim = input_dim
-        self.seed = seed
-        self.model: Optional[TabularMLP] = None
-
-    def fit(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: Optional[np.ndarray] = None,
-        y_val: Optional[np.ndarray] = None,
-    ) -> None:
-        self.model = get_mlp_for_dataset(self.dataset_name, self.input_dim)
-        loss_fn = nn.CrossEntropyLoss()
-        self.model = _train_mlp(
-            self.model, X_train, y_train, X_val, y_val, loss_fn, self.seed
-        )
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return self.predict_proba(X).argmax(axis=1)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        device = get_device()
-        self.model.eval()
-        with torch.no_grad():
-            X_t = torch.FloatTensor(X).to(device)
-            logits = self.model(X_t)
-            probs = F.softmax(logits, dim=1).cpu().numpy()
-        return probs
-
-    def save(self, path: Path) -> None:
-        if self.model is None:
-            raise RuntimeError("Cannot save: model not fitted.")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "state_dict": self.model.state_dict(),
-            "dataset_name": self.dataset_name,
-            "input_dim": self.input_dim,
-            "seed": self.seed,
-        }, path)
-
-    @classmethod
-    def load(cls, path: Path) -> "MLPStandardBaseline":
-        checkpoint = torch.load(path, map_location="cpu")
-        obj = cls(
-            dataset_name=checkpoint["dataset_name"],
-            input_dim=checkpoint["input_dim"],
-            seed=checkpoint["seed"],
-        )
-        obj.model = get_mlp_for_dataset(checkpoint["dataset_name"], checkpoint["input_dim"])
-        obj.model.load_state_dict(checkpoint["state_dict"])
-        return obj
-
-
-# ── B2: Focal Loss MLP ────────────────────────────────────────────────────────
-
-class FocalLoss(nn.Module):
-    """Focal Loss for binary classification.
-
-    focal_loss = -alpha * (1 - p_t)^gamma * log(p_t + eps)
-
-    Args:
-        alpha: Weighting factor for the rare class. Default 0.25.
-        gamma: Focusing parameter. Default 2.0.
-    """
-
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0) -> None:
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute focal loss.
-
-        Args:
-            logits: Raw model outputs, shape [B, C].
-            targets: Ground truth labels, shape [B].
-
-        Returns:
-            Scalar focal loss.
-        """
-        probs = F.softmax(logits, dim=1)
-        batch_size = logits.shape[0]
-        # p_t = probability of the true class
-        p_t = probs[torch.arange(batch_size, device=logits.device), targets]
-        focal_weight = self.alpha * (1.0 - p_t) ** self.gamma
-        loss = -focal_weight * torch.log(p_t + 1e-8)
-        return loss.mean()
-
-
-class MLPFocalLossBaseline(BaselineModel):
-    """MLP with Focal Loss (Baseline B2).
-
-    Args:
-        dataset_name: Dataset key for architecture selection.
-        input_dim: Number of input features.
-        seed: Random seed.
-        alpha: Focal loss alpha. Default 0.25.
-        gamma: Focal loss gamma. Default 2.0.
-    """
+class NeuralBaseline(BaselineModel):
+    """Generic neural baseline supporting any architecture + loss combination."""
 
     def __init__(
         self,
-        dataset_name: str,
-        input_dim: int,
+        architecture: str = "mlp",
+        loss_name: str = "ce",
+        dataset_name: str = "adult",
+        input_dim: int = 14,
+        num_classes: int = 2,
         seed: int = 42,
-        alpha: float = 0.25,
-        gamma: float = 2.0,
+        lr: float = LEARNING_RATE,
+        weight_decay: float = WEIGHT_DECAY,
+        optimizer_name: str = "AdamW",
     ) -> None:
+        self.architecture = architecture
+        self.loss_name = loss_name
         self.dataset_name = dataset_name
         self.input_dim = input_dim
+        self.num_classes = num_classes
         self.seed = seed
-        self.alpha = alpha
-        self.gamma = gamma
-        self.model: Optional[TabularMLP] = None
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.optimizer_name = optimizer_name
+        self.model: Optional[nn.Module] = None
 
     def fit(
         self,
@@ -317,18 +134,95 @@ class MLPFocalLossBaseline(BaselineModel):
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None,
     ) -> None:
-        self.model = get_mlp_for_dataset(self.dataset_name, self.input_dim)
-        loss_fn = FocalLoss(alpha=self.alpha, gamma=self.gamma)
-        self.model = _train_mlp(
-            self.model, X_train, y_train, X_val, y_val, loss_fn, self.seed
+        from sklearn.metrics import f1_score
+        from src.loss.robust_losses import build_loss
+
+        device = get_device()
+        self.model = build_neural_model(
+            self.architecture,
+            input_dim=self.input_dim,
+            num_classes=self.num_classes,
+            dataset_name=self.dataset_name,
+        ).to(device)
+
+        class_counts = [int(np.sum(y_train == c)) for c in range(self.num_classes)]
+
+        loss_fn = build_loss(
+            loss_name=self.loss_name,
+            n_samples=len(y_train),
+            n_classes=self.num_classes,
+            class_counts=class_counts,
+            device=device,
         )
+
+        # Optimizer selection
+        if self.optimizer_name.lower() == "sgd":
+            optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9, weight_decay=self.weight_decay)
+        elif self.optimizer_name.lower() == "adam":
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        else:
+            optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+
+        train_dataset = TabularDataset(X_train, y_train)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+
+        best_val_f1 = -1.0
+        patience_counter = 0
+        best_state = None
+
+        for epoch in range(MAX_EPOCHS):
+            self.model.train()
+            for X_b, y_b, idx_b in train_loader:
+                X_b, y_b, idx_b = X_b.to(device), y_b.to(device), idx_b.to(device)
+                optimizer.zero_grad()
+                logits = self.model(X_b)
+
+                # Loss forward
+                if hasattr(loss_fn, "target_history") or "sample_indices" in loss_fn.forward.__code__.co_varnames:
+                    loss = loss_fn(logits, y_b, sample_indices=idx_b, current_epoch=epoch)
+                elif hasattr(loss_fn, "update_history") or "current_epoch" in loss_fn.forward.__code__.co_varnames:
+                    loss = loss_fn(logits, y_b, idx_b, epoch)
+                else:
+                    loss = loss_fn(logits, y_b)
+
+                if torch.isnan(loss):
+                    break
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), GRAD_CLIP_NORM)
+                optimizer.step()
+
+                if hasattr(loss_fn, "update_history"):
+                    with torch.no_grad():
+                        probs = F.softmax(logits.detach(), dim=1)
+                        loss_fn.update_history(probs, idx_b, epoch)
+
+            # Validation
+            if X_val is not None and y_val is not None:
+                self.model.eval()
+                with torch.no_grad():
+                    X_val_t = torch.FloatTensor(X_val).to(device)
+                    logits_val = self.model(X_val_t)
+                    y_pred = logits_val.argmax(dim=1).cpu().numpy()
+
+                val_f1 = float(f1_score(y_val, y_pred, average="macro", zero_division=0))
+                if val_f1 > best_val_f1:
+                    best_val_f1 = val_f1
+                    patience_counter = 0
+                    best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                else:
+                    patience_counter += 1
+                    if patience_counter >= EARLY_STOP_PATIENCE:
+                        break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return self.predict_proba(X).argmax(axis=1)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
+            raise RuntimeError("Model not fitted.")
         device = get_device()
         self.model.eval()
         with torch.no_grad():
@@ -339,225 +233,43 @@ class MLPFocalLossBaseline(BaselineModel):
 
     def save(self, path: Path) -> None:
         if self.model is None:
-            raise RuntimeError("Cannot save: model not fitted.")
+            raise RuntimeError("Cannot save unfitted model.")
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
             "state_dict": self.model.state_dict(),
+            "architecture": self.architecture,
+            "loss_name": self.loss_name,
             "dataset_name": self.dataset_name,
             "input_dim": self.input_dim,
-            "seed": self.seed,
-            "alpha": self.alpha,
-            "gamma": self.gamma,
-        }, path)
-
-    @classmethod
-    def load(cls, path: Path) -> "MLPFocalLossBaseline":
-        checkpoint = torch.load(path, map_location="cpu")
-        obj = cls(
-            dataset_name=checkpoint["dataset_name"],
-            input_dim=checkpoint["input_dim"],
-            seed=checkpoint["seed"],
-            alpha=checkpoint.get("alpha", 0.25),
-            gamma=checkpoint.get("gamma", 2.0),
-        )
-        obj.model = get_mlp_for_dataset(checkpoint["dataset_name"], checkpoint["input_dim"])
-        obj.model.load_state_dict(checkpoint["state_dict"])
-        return obj
-
-
-# ── B3: Class-Weighted CE MLP ─────────────────────────────────────────────────
-
-class MLPWeightedCEBaseline(BaselineModel):
-    """MLP with class-weighted cross-entropy loss (Baseline B3).
-
-    Args:
-        dataset_name: Dataset key for architecture selection.
-        input_dim: Number of input features.
-        seed: Random seed.
-    """
-
-    def __init__(self, dataset_name: str, input_dim: int, seed: int = 42) -> None:
-        self.dataset_name = dataset_name
-        self.input_dim = input_dim
-        self.seed = seed
-        self.model: Optional[TabularMLP] = None
-        self._class_weights: Optional[torch.Tensor] = None
-
-    def fit(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: Optional[np.ndarray] = None,
-        y_val: Optional[np.ndarray] = None,
-    ) -> None:
-        n_majority = int(np.sum(y_train == 0))
-        n_minority = int(np.sum(y_train == 1))
-
-        if n_majority == 0 or n_minority == 0:
-            raise ValueError(
-                f"Both classes must be present in y_train. "
-                f"Got n_majority={n_majority}, n_minority={n_minority}."
-            )
-
-        weights = torch.tensor(
-            [1.0 / n_majority, 1.0 / n_minority], dtype=torch.float32
-        )
-        weights = weights / weights.sum()
-        self._class_weights = weights
-
-        device = get_device()
-        loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
-
-        self.model = get_mlp_for_dataset(self.dataset_name, self.input_dim)
-        self.model = _train_mlp(
-            self.model, X_train, y_train, X_val, y_val, loss_fn, self.seed
-        )
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return self.predict_proba(X).argmax(axis=1)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        device = get_device()
-        self.model.eval()
-        with torch.no_grad():
-            X_t = torch.FloatTensor(X).to(device)
-            logits = self.model(X_t)
-            probs = F.softmax(logits, dim=1).cpu().numpy()
-        return probs
-
-    def save(self, path: Path) -> None:
-        if self.model is None:
-            raise RuntimeError("Cannot save: model not fitted.")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "state_dict": self.model.state_dict(),
-            "dataset_name": self.dataset_name,
-            "input_dim": self.input_dim,
-            "seed": self.seed,
-            "class_weights": self._class_weights,
-        }, path)
-
-    @classmethod
-    def load(cls, path: Path) -> "MLPWeightedCEBaseline":
-        checkpoint = torch.load(path, map_location="cpu")
-        obj = cls(
-            dataset_name=checkpoint["dataset_name"],
-            input_dim=checkpoint["input_dim"],
-            seed=checkpoint["seed"],
-        )
-        obj.model = get_mlp_for_dataset(checkpoint["dataset_name"], checkpoint["input_dim"])
-        obj.model.load_state_dict(checkpoint["state_dict"])
-        obj._class_weights = checkpoint.get("class_weights")
-        return obj
-
-
-# ── B4: SMOTE + MLP ───────────────────────────────────────────────────────────
-
-class MLPSMOTEBaseline(BaselineModel):
-    """MLP trained on SMOTE-resampled data (Baseline B4).
-
-    SMOTE is applied INSIDE fit() on training data only.
-    Never applied to val or test.
-
-    Args:
-        dataset_name: Dataset key for architecture selection.
-        input_dim: Number of input features.
-        seed: Random seed.
-    """
-
-    def __init__(self, dataset_name: str, input_dim: int, seed: int = 42) -> None:
-        self.dataset_name = dataset_name
-        self.input_dim = input_dim
-        self.seed = seed
-        self.model: Optional[TabularMLP] = None
-
-    def fit(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: Optional[np.ndarray] = None,
-        y_val: Optional[np.ndarray] = None,
-    ) -> None:
-        from imblearn.over_sampling import SMOTE
-
-        n_minority = int(np.sum(y_train == 1))
-
-        if n_minority < 2:
-            raise ValueError(
-                f"SMOTE requires at least 2 minority samples. Got {n_minority}."
-            )
-
-        k_neighbors = min(5, n_minority - 1)
-        if k_neighbors < 5:
-            logger.warning(
-                f"SMOTE: n_minority={n_minority} < 6, "
-                f"using k_neighbors={k_neighbors} instead of default 5."
-            )
-
-        smote = SMOTE(random_state=self.seed, k_neighbors=k_neighbors)
-        X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
-
-        logger.info(
-            f"SMOTE resampling: {len(y_train)} → {len(y_resampled)} samples "
-            f"(minority: {n_minority} → {int(np.sum(y_resampled == 1))})"
-        )
-
-        self.model = get_mlp_for_dataset(self.dataset_name, self.input_dim)
-        loss_fn = nn.CrossEntropyLoss()
-        self.model = _train_mlp(
-            self.model, X_resampled, y_resampled, X_val, y_val, loss_fn, self.seed
-        )
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return self.predict_proba(X).argmax(axis=1)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        device = get_device()
-        self.model.eval()
-        with torch.no_grad():
-            X_t = torch.FloatTensor(X).to(device)
-            logits = self.model(X_t)
-            probs = F.softmax(logits, dim=1).cpu().numpy()
-        return probs
-
-    def save(self, path: Path) -> None:
-        if self.model is None:
-            raise RuntimeError("Cannot save: model not fitted.")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "state_dict": self.model.state_dict(),
-            "dataset_name": self.dataset_name,
-            "input_dim": self.input_dim,
+            "num_classes": self.num_classes,
             "seed": self.seed,
         }, path)
 
     @classmethod
-    def load(cls, path: Path) -> "MLPSMOTEBaseline":
+    def load(cls, path: Path) -> "NeuralBaseline":
         checkpoint = torch.load(path, map_location="cpu")
         obj = cls(
+            architecture=checkpoint["architecture"],
+            loss_name=checkpoint["loss_name"],
             dataset_name=checkpoint["dataset_name"],
             input_dim=checkpoint["input_dim"],
+            num_classes=checkpoint.get("num_classes", 2),
             seed=checkpoint["seed"],
         )
-        obj.model = get_mlp_for_dataset(checkpoint["dataset_name"], checkpoint["input_dim"])
+        obj.model = build_neural_model(
+            obj.architecture, input_dim=obj.input_dim, num_classes=obj.num_classes, dataset_name=obj.dataset_name
+        )
         obj.model.load_state_dict(checkpoint["state_dict"])
         return obj
 
 
-# ── B5: XGBoost Default ───────────────────────────────────────────────────────
+# ── Tree Baselines (XGBoost, LightGBM) ────────────────────────────────────────
 
-class XGBoostDefaultBaseline(BaselineModel):
-    """XGBoost with default settings (Baseline B5).
+class XGBoostBaseline(BaselineModel):
+    """XGBoost baseline with optional class reweighting."""
 
-    Args:
-        seed: Random seed.
-    """
-
-    def __init__(self, seed: int = 42) -> None:
+    def __init__(self, weighted: bool = False, seed: int = 42) -> None:
+        self.weighted = weighted
         self.seed = seed
         self.model = None
 
@@ -570,34 +282,25 @@ class XGBoostDefaultBaseline(BaselineModel):
     ) -> None:
         import xgboost as xgb
 
-        n_minority = int(np.sum(y_train == 1))
-        if n_minority == 0:
-            raise ValueError(
-                "XGBoost training requires at least one minority sample. "
-                "Got n_minority=0. Check your data split."
-            )
+        kwargs = {
+            "random_state": self.seed,
+            "verbosity": 0,
+        }
+        n_classes = len(np.unique(y_train))
+        if n_classes == 2 and self.weighted:
+            n_0 = int(np.sum(y_train == 0))
+            n_1 = int(np.sum(y_train == 1))
+            if n_1 > 0:
+                kwargs["scale_pos_weight"] = n_0 / n_1
 
-        eval_set = [(X_val, y_val)] if X_val is not None else None
-        self.model = xgb.XGBClassifier(
-            eval_metric="logloss",
-            random_state=self.seed,
-            use_label_encoder=False,
-            verbosity=0,
-        )
-        self.model.fit(
-            X_train, y_train,
-            eval_set=eval_set,
-            verbose=False,
-        )
+        eval_set = [(X_val, y_val)] if (X_val is not None and y_val is not None) else None
+        self.model = xgb.XGBClassifier(**kwargs)
+        self.model.fit(X_train, y_train, eval_set=eval_set, verbose=False)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
         return self.model.predict(X)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
         return self.model.predict_proba(X)
 
     def save(self, path: Path) -> None:
@@ -606,88 +309,13 @@ class XGBoostDefaultBaseline(BaselineModel):
             pickle.dump(self, f)
 
     @classmethod
-    def load(cls, path: Path) -> "XGBoostDefaultBaseline":
+    def load(cls, path: Path) -> "XGBoostBaseline":
         with open(path, "rb") as f:
             return pickle.load(f)
 
 
-# ── B6: XGBoost Weighted ──────────────────────────────────────────────────────
-
-class XGBoostWeightedBaseline(BaselineModel):
-    """XGBoost with scale_pos_weight for class imbalance (Baseline B6).
-
-    Args:
-        seed: Random seed.
-    """
-
-    def __init__(self, seed: int = 42) -> None:
-        self.seed = seed
-        self.model = None
-
-    def fit(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: Optional[np.ndarray] = None,
-        y_val: Optional[np.ndarray] = None,
-    ) -> None:
-        import xgboost as xgb
-
-        n_majority = int(np.sum(y_train == 0))
-        n_minority = int(np.sum(y_train == 1))
-
-        if n_minority == 0:
-            raise ValueError(
-                "XGBoostWeighted requires at least one minority sample. "
-                "Got n_minority=0."
-            )
-
-        scale_pos_weight = n_majority / n_minority
-        logger.info(f"XGBoostWeighted: scale_pos_weight={scale_pos_weight:.2f}")
-
-        eval_set = [(X_val, y_val)] if X_val is not None else None
-        self.model = xgb.XGBClassifier(
-            scale_pos_weight=scale_pos_weight,
-            eval_metric="logloss",
-            random_state=self.seed,
-            use_label_encoder=False,
-            verbosity=0,
-        )
-        self.model.fit(
-            X_train, y_train,
-            eval_set=eval_set,
-            verbose=False,
-        )
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        return self.model.predict(X)
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        return self.model.predict_proba(X)
-
-    def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
-
-    @classmethod
-    def load(cls, path: Path) -> "XGBoostWeightedBaseline":
-        with open(path, "rb") as f:
-            return pickle.load(f)
-
-
-# ── B7: LightGBM Default ──────────────────────────────────────────────────────
-
-class LightGBMDefaultBaseline(BaselineModel):
-    """LightGBM with default settings (Baseline B7).
-
-    Args:
-        seed: Random seed.
-    """
+class LightGBMBaseline(BaselineModel):
+    """LightGBM baseline."""
 
     def __init__(self, seed: int = 42) -> None:
         self.seed = seed
@@ -701,36 +329,51 @@ class LightGBMDefaultBaseline(BaselineModel):
         y_val: Optional[np.ndarray] = None,
     ) -> None:
         import lightgbm as lgb
+        import pandas as pd
 
-        callbacks = [lgb.log_evaluation(period=-1)]  # suppress output
-        eval_set = [(X_val, y_val)] if X_val is not None else None
-
-        self.model = lgb.LGBMClassifier(
-            random_state=self.seed,
-            verbose=-1,
-        )
-        # Convert to DataFrame to avoid "feature names" warning during inference
-        import pandas as _pd
-        X_train_df = _pd.DataFrame(X_train)
-        X_val_df = _pd.DataFrame(X_val) if X_val is not None else None
+        callbacks = [lgb.log_evaluation(period=-1)]
+        self.model = lgb.LGBMClassifier(random_state=self.seed, verbose=-1)
+        X_train_df = pd.DataFrame(X_train)
+        X_val_df = pd.DataFrame(X_val) if X_val is not None else None
         eval_set_df = [(X_val_df, y_val)] if X_val_df is not None else None
-        self.model.fit(
-            X_train_df, y_train,
-            eval_set=eval_set_df,
-            callbacks=callbacks,
-        )
+        self.model.fit(X_train_df, y_train, eval_set=eval_set_df, callbacks=callbacks)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        import pandas as _pd
-        return self.model.predict(_pd.DataFrame(X))
+        import pandas as pd
+        return self.model.predict(pd.DataFrame(X))
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-        import pandas as _pd
-        return self.model.predict_proba(_pd.DataFrame(X))
+        import pandas as pd
+        return self.model.predict_proba(pd.DataFrame(X))
+
+class CatBoostBaseline(BaselineModel):
+    """CatBoost gradient boosting baseline."""
+
+    def __init__(self, seed: int = 42) -> None:
+        self.seed = seed
+        self.model = None
+
+    def fit(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None,
+    ) -> None:
+        from catboost import CatBoostClassifier
+        eval_set = (X_val, y_val) if X_val is not None and y_val is not None else None
+        self.model = CatBoostClassifier(
+            random_seed=self.seed,
+            verbose=False,
+            early_stopping_rounds=20 if eval_set is not None else None,
+        )
+        self.model.fit(X_train, y_train, eval_set=eval_set, verbose=False)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self.model.predict(X).astype(int).flatten()
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return self.model.predict_proba(X)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -738,48 +381,49 @@ class LightGBMDefaultBaseline(BaselineModel):
             pickle.dump(self, f)
 
     @classmethod
-    def load(cls, path: Path) -> "LightGBMDefaultBaseline":
+    def load(cls, path: Path) -> "CatBoostBaseline":
         with open(path, "rb") as f:
             return pickle.load(f)
 
-
-# ── Factory ───────────────────────────────────────────────────────────────────
 
 def get_baseline(
     model_name: str,
     dataset_name: str,
     input_dim: int,
+    num_classes: int = 2,
     seed: int = 42,
 ) -> BaselineModel:
-    """Factory function: return the appropriate baseline model instance.
+    """Factory returning configured baseline model."""
+    name = model_name.lower().strip()
 
-    Args:
-        model_name: One of config.MODEL_NAMES (excluding 'mlp_ccr').
-        dataset_name: Dataset key from config.DATASETS.
-        input_dim: Number of input features.
-        seed: Random seed.
-
-    Returns:
-        Instantiated (unfitted) baseline model.
-
-    Raises:
-        ValueError: If model_name is not recognized.
-    """
-    registry = {
-        "mlp_standard":     lambda: MLPStandardBaseline(dataset_name, input_dim, seed),
-        "mlp_focal":        lambda: MLPFocalLossBaseline(dataset_name, input_dim, seed),
-        "mlp_weighted_ce":  lambda: MLPWeightedCEBaseline(dataset_name, input_dim, seed),
-        "mlp_smote":        lambda: MLPSMOTEBaseline(dataset_name, input_dim, seed),
-        "xgboost_default":  lambda: XGBoostDefaultBaseline(seed),
-        "xgboost_weighted": lambda: XGBoostWeightedBaseline(seed),
-        "lightgbm_default": lambda: LightGBMDefaultBaseline(seed),
-    }
-
-    if model_name not in registry:
-        raise ValueError(
-            f"Unknown baseline model '{model_name}'. "
-            f"Valid options: {list(registry.keys())}. "
-            f"For CCR, use the dedicated CCRLoss in src/loss/ccr_loss.py."
+    if name == "xgboost_default":
+        return XGBoostBaseline(weighted=False, seed=seed)
+    elif name == "xgboost_weighted":
+        return XGBoostBaseline(weighted=True, seed=seed)
+    elif name == "lightgbm_default":
+        return LightGBMBaseline(seed=seed)
+    elif name in ("catboost", "catboost_default"):
+        return CatBoostBaseline(seed=seed)
+    elif name.startswith("mlp_"):
+        loss_key = name.replace("mlp_", "")
+        if loss_key == "standard":
+            loss_key = "ce"
+        elif loss_key == "weighted_ce":
+            loss_key = "wce"
+        return NeuralBaseline(
+            architecture="mlp",
+            loss_name=loss_key,
+            dataset_name=dataset_name,
+            input_dim=input_dim,
+            num_classes=num_classes,
+            seed=seed,
         )
-
-    return registry[model_name]()
+    else:
+        return NeuralBaseline(
+            architecture="mlp",
+            loss_name=name,
+            dataset_name=dataset_name,
+            input_dim=input_dim,
+            num_classes=num_classes,
+            seed=seed,
+        )

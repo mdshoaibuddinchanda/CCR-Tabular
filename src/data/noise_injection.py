@@ -1,19 +1,24 @@
-"""Label noise injection for CCR-Tabular experiments.
+"""Label noise injection engine for CCR-Tabular experiments.
 
-CRITICAL: Noise injection touches the TRAINING SPLIT ONLY. Never call these
-functions on validation or test data. A size-based guardrail is included.
+Implements standalone, fold-local noise generation for all requested noise regimes:
+  1. Asymmetric Noise: Minority (1) -> Majority (0) flips.
+  2. Symmetric Noise: Uniform random class flips.
+  3. Feature-Correlated Noise: Fold-local boundary ranking via margin M(x) = |P(y=1) - P(y=0)|.
+     Candidates chosen from lowest 40% margin with exact corruption count floor(eps * N_train).
+  4. Instance-Dependent Noise (IDN): Feature-dependent corruption probability P(y_tilde != y | x).
+
+CRITICAL: All reference models and noise generation logic operate STRICTLY on the
+training fold (X_train, y_train). Never pass validation or test splits.
 """
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
+from sklearn.linear_model import LogisticRegression
 
 logger = logging.getLogger(__name__)
 
-# Safety threshold: if y_train has more samples than this, it's likely the
-# full dataset (not just a training fold), which would mean noise is being
-# applied to test data.
 _MAX_SAFE_TRAIN_SIZE = 60_000
 
 
@@ -21,94 +26,107 @@ def inject_asymmetric_noise(
     y_train: np.ndarray,
     noise_rate: float,
     seed: int,
-) -> Tuple[np.ndarray, Dict[str, int]]:
+) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Flip minority class (1) labels to majority class (0).
 
-    This simulates the most damaging real-world noise for imbalanced learning:
-    the minority signal is corrupted by majority mislabeling.
-
     Args:
-        y_train: Binary labels {0, 1}. Shape [N].
+        y_train: Binary labels {0, 1}, shape [N].
         noise_rate: Fraction of minority-class labels to flip (0.0 to 1.0).
-        seed: Random seed for reproducibility.
+        seed: Random seed.
 
     Returns:
-        Tuple of (y_noisy, stats_dict) where stats_dict contains:
-            - n_flipped: Number of labels actually flipped.
-            - n_minority_before: Count of minority samples before noise.
-            - n_minority_after: Count of minority samples after noise.
-            - actual_noise_rate: Actual fraction flipped.
-
-    Raises:
-        ValueError: If noise_rate not in [0.0, 1.0].
-        ValueError: If y_train does not contain both 0 and 1.
-        ValueError: If y_train is suspiciously large (likely full dataset).
+        Tuple of (y_noisy, stats_dict).
     """
-    # ── Safety guardrail: prevent accidental noise on test data ───────────────
     if len(y_train) > _MAX_SAFE_TRAIN_SIZE:
         raise ValueError(
             f"y_train has {len(y_train)} samples. If this is the full dataset "
             f"(not just the training fold), noise is being applied to test data. "
-            f"Pass only the training fold. "
-            f"Maximum safe training size: {_MAX_SAFE_TRAIN_SIZE}."
+            f"Pass only the training fold. Maximum safe training size: {_MAX_SAFE_TRAIN_SIZE}."
         )
-
-    # ── Input validation ──────────────────────────────────────────────────────
     if not (0.0 <= noise_rate <= 1.0):
-        raise ValueError(
-            f"noise_rate must be in [0.0, 1.0], got {noise_rate}. "
-            f"If you meant 20%, pass noise_rate=0.20, not noise_rate=20."
-        )
+        raise ValueError(f"noise_rate must be in [0.0, 1.0], got {noise_rate}.")
 
     unique_vals = np.unique(y_train)
     if not (0 in unique_vals and 1 in unique_vals):
-        raise ValueError(
-            f"y_train must contain both class 0 (majority) and class 1 (minority). "
-            f"Got unique values: {unique_vals.tolist()}."
-        )
+        raise ValueError(f"y_train must contain both class 0 and 1. Got: {unique_vals}.")
 
     y_noisy = y_train.copy()
-
-    if noise_rate == 0.0:
-        stats = {
-            "n_flipped": 0,
-            "n_minority_before": int(np.sum(y_train == 1)),
-            "n_minority_after": int(np.sum(y_noisy == 1)),
-            "actual_noise_rate": 0.0,
-        }
-        return y_noisy, stats
-
-    # ── Flip minority labels ──────────────────────────────────────────────────
-    rng = np.random.default_rng(seed)
     minority_indices = np.where(y_train == 1)[0]
     n_minority_before = len(minority_indices)
 
-    n_to_flip = int(np.round(noise_rate * n_minority_before))
-    flip_indices = rng.choice(minority_indices, size=n_to_flip, replace=False)
-    y_noisy[flip_indices] = 0
+    if noise_rate == 0.0 or n_minority_before == 0:
+        return y_noisy, {
+            "noise_type": "asym",
+            "n_flipped": 0,
+            "n_minority_before": n_minority_before,
+            "n_minority_after": n_minority_before,
+            "actual_noise_rate": 0.0,
+        }
+
+    rng = np.random.default_rng(seed)
+    n_to_flip = int(np.floor(noise_rate * n_minority_before))
+    if n_to_flip > 0:
+        flip_indices = rng.choice(minority_indices, size=n_to_flip, replace=False)
+        y_noisy[flip_indices] = 0
 
     n_minority_after = int(np.sum(y_noisy == 1))
     actual_rate = n_to_flip / n_minority_before if n_minority_before > 0 else 0.0
 
-    # ── CRITICAL ASSERTION: majority labels must never be flipped ─────────────
+    # Assertion: majority labels must never be modified
     assert np.sum(y_noisy[y_train == 0] != y_train[y_train == 0]) == 0, (
-        "Asymmetric noise must NEVER flip majority class (0) labels. "
-        "This is a bug in inject_asymmetric_noise."
+        "Asymmetric noise must NEVER flip majority class (0) labels."
     )
 
     stats = {
+        "noise_type": "asym",
         "n_flipped": n_to_flip,
         "n_minority_before": n_minority_before,
         "n_minority_after": n_minority_after,
         "actual_noise_rate": actual_rate,
     }
+    return y_noisy, stats
 
-    logger.info(
-        f"Asymmetric noise injected: flipped {n_to_flip}/{n_minority_before} "
-        f"minority labels (target={noise_rate:.0%}, actual={actual_rate:.2%}). "
-        f"Minority count: {n_minority_before} → {n_minority_after}."
-    )
 
+def inject_symmetric_noise(
+    y_train: np.ndarray,
+    noise_rate: float,
+    seed: int,
+    n_classes: int = 2,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Flip labels uniformly across all classes with rate eps."""
+    if len(y_train) > _MAX_SAFE_TRAIN_SIZE:
+        raise ValueError(
+            f"y_train has {len(y_train)} samples. Pass only the training fold. "
+            f"Maximum safe training size: {_MAX_SAFE_TRAIN_SIZE}."
+        )
+    if not (0.0 <= noise_rate <= 1.0):
+        raise ValueError(f"noise_rate must be in [0.0, 1.0], got {noise_rate}.")
+
+    y_noisy = y_train.copy()
+    n_total = len(y_train)
+
+    if noise_rate == 0.0 or n_total == 0:
+        return y_noisy, {
+            "noise_type": "sym",
+            "n_flipped": 0,
+            "actual_noise_rate": 0.0,
+        }
+
+    rng = np.random.default_rng(seed)
+    n_to_flip = int(np.floor(noise_rate * n_total))
+    flip_indices = rng.choice(n_total, size=n_to_flip, replace=False)
+
+    for idx in flip_indices:
+        curr_label = y_noisy[idx]
+        other_classes = [c for c in range(n_classes) if c != curr_label]
+        y_noisy[idx] = rng.choice(other_classes)
+
+    actual_rate = n_to_flip / n_total
+    stats = {
+        "noise_type": "sym",
+        "n_flipped": n_to_flip,
+        "actual_noise_rate": actual_rate,
+    }
     return y_noisy, stats
 
 
@@ -117,105 +135,161 @@ def inject_feature_correlated_noise(
     y_train: np.ndarray,
     noise_rate: float,
     seed: int,
+    reference_model: Optional[Any] = None,
+    candidate_fraction: float = 0.40,
     model_confidences: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, Dict[str, int]]:
-    """Flip labels of low-confidence samples (near decision boundary).
-
-    If model_confidences is None, uses random sampling as a proxy.
-    In the full pipeline, this is called after epoch 5 using the current
-    model's predicted probabilities as confidences.
-
-    Args:
-        X_train: Training features. Shape [N, F].
-        y_train: Training labels. Shape [N].
-        noise_rate: Fraction of boundary samples to corrupt.
-        seed: Random seed.
-        model_confidences: Optional array of max softmax probabilities.
-            If provided, samples with confidence < 0.6 are candidates.
-            If None, candidates are selected randomly.
-
-    Returns:
-        Tuple of (y_noisy, stats_dict) where stats_dict contains:
-            - n_flipped: Number of labels flipped.
-            - n_candidates: Number of boundary candidates identified.
-            - actual_noise_rate: Actual fraction of total samples flipped.
-
-    Raises:
-        ValueError: If noise_rate not in [0.0, 1.0].
-        ValueError: If y_train is suspiciously large (likely full dataset).
-    """
-    # ── Safety guardrail ──────────────────────────────────────────────────────
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Flip labels of boundary samples identified via fold-local reference model confidence margin."""
     if len(y_train) > _MAX_SAFE_TRAIN_SIZE:
         raise ValueError(
-            f"y_train has {len(y_train)} samples. If this is the full dataset "
-            f"(not just the training fold), noise is being applied to test data. "
-            f"Pass only the training fold. "
+            f"y_train has {len(y_train)} samples. Pass only the training fold. "
             f"Maximum safe training size: {_MAX_SAFE_TRAIN_SIZE}."
         )
-
     if not (0.0 <= noise_rate <= 1.0):
-        raise ValueError(
-            f"noise_rate must be in [0.0, 1.0], got {noise_rate}. "
-            f"If you meant 20%, pass noise_rate=0.20, not noise_rate=20."
-        )
+        raise ValueError(f"noise_rate must be in [0.0, 1.0], got {noise_rate}.")
 
     y_noisy = y_train.copy()
-
-    if noise_rate == 0.0:
-        return y_noisy, {"n_flipped": 0, "n_candidates": 0, "actual_noise_rate": 0.0}
-
-    rng = np.random.default_rng(seed)
     n_total = len(y_train)
 
-    # ── Identify boundary candidates ──────────────────────────────────────────
-    _CONFIDENCE_THRESHOLD = 0.6
+    if noise_rate == 0.0 or n_total == 0:
+        return y_noisy, {
+            "noise_type": "feat",
+            "n_flipped": 0,
+            "n_candidates": 0,
+            "actual_noise_rate": 0.0,
+        }
+
+    rng = np.random.default_rng(seed)
 
     if model_confidences is not None:
-        if len(model_confidences) != n_total:
-            raise ValueError(
-                f"model_confidences length ({len(model_confidences)}) must match "
-                f"y_train length ({n_total})."
-            )
-        candidate_mask = model_confidences < _CONFIDENCE_THRESHOLD
+        candidate_mask = model_confidences < 0.6
         candidate_indices = np.where(candidate_mask)[0]
     else:
-        # Fallback: random selection as proxy for boundary samples
-        logger.warning(
-            "model_confidences not provided for feature-correlated noise. "
-            "Using random sampling as a proxy for boundary samples."
-        )
-        n_candidates = max(1, int(noise_rate * n_total * 2))  # oversample candidates
-        candidate_indices = rng.choice(n_total, size=min(n_candidates, n_total), replace=False)
+        # 1. Fit fold-local reference model
+        if reference_model is None:
+            clf = LogisticRegression(max_iter=500, random_state=seed)
+            clf.fit(X_train, y_train)
+        else:
+            clf = reference_model
 
-    n_candidates = len(candidate_indices)
+        # 2. Compute margin
+        probs = clf.predict_proba(X_train)
+        if probs.shape[1] == 2:
+            margins = np.abs(probs[:, 1] - probs[:, 0])
+        else:
+            sorted_probs = np.sort(probs, axis=1)
+            margins = sorted_probs[:, -1] - sorted_probs[:, -2]
 
-    if n_candidates == 0:
-        logger.warning(
-            "No boundary candidates found for feature-correlated noise injection. "
-            "All model confidences are >= threshold. Returning unmodified labels."
-        )
-        return y_noisy, {"n_flipped": 0, "n_candidates": 0, "actual_noise_rate": 0.0}
+        sorted_indices = np.argsort(margins)
+        n_candidates = max(1, int(np.ceil(candidate_fraction * n_total)))
+        candidate_indices = sorted_indices[:n_candidates]
 
-    # ── Flip labels of selected candidates ───────────────────────────────────
-    n_to_flip = max(1, int(np.round(noise_rate * n_candidates)))
-    n_to_flip = min(n_to_flip, n_candidates)
+    if len(candidate_indices) == 0:
+        return y_noisy, {"noise_type": "feat", "n_flipped": 0, "n_candidates": 0, "actual_noise_rate": 0.0}
+
+    n_to_flip = min(int(np.floor(noise_rate * n_total)), len(candidate_indices))
+    if n_to_flip == 0:
+        n_to_flip = min(1, len(candidate_indices))
 
     flip_indices = rng.choice(candidate_indices, size=n_to_flip, replace=False)
-    # Flip: 0 → 1, 1 → 0
-    y_noisy[flip_indices] = 1 - y_noisy[flip_indices]
 
-    actual_rate = n_to_flip / n_total
+    n_classes = len(np.unique(y_train))
+    for idx in flip_indices:
+        curr_label = y_noisy[idx]
+        other_classes = [c for c in range(n_classes) if c != curr_label]
+        if other_classes:
+            y_noisy[idx] = rng.choice(other_classes)
+        else:
+            y_noisy[idx] = 1 - curr_label
 
+    actual_rate = n_to_flip / n_total if n_total > 0 else 0.0
     stats = {
+        "noise_type": "feat",
         "n_flipped": n_to_flip,
-        "n_candidates": n_candidates,
+        "n_candidates": len(candidate_indices),
         "actual_noise_rate": actual_rate,
     }
-
-    logger.info(
-        f"Feature-correlated noise injected: flipped {n_to_flip} labels "
-        f"from {n_candidates} boundary candidates "
-        f"(actual_rate={actual_rate:.2%})."
-    )
-
     return y_noisy, stats
+
+
+def inject_instance_dependent_noise(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    noise_rate: float,
+    seed: int,
+    n_classes: int = 2,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Inject Instance-Dependent Noise (IDN)."""
+    if len(y_train) > _MAX_SAFE_TRAIN_SIZE:
+        raise ValueError(
+            f"y_train has {len(y_train)} samples. Pass only the training fold. "
+            f"Maximum safe training size: {_MAX_SAFE_TRAIN_SIZE}."
+        )
+    if not (0.0 <= noise_rate <= 1.0):
+        raise ValueError(f"noise_rate must be in [0.0, 1.0], got {noise_rate}.")
+
+    y_noisy = y_train.copy()
+    n_total, n_features = X_train.shape
+
+    if noise_rate == 0.0 or n_total == 0:
+        return y_noisy, {
+            "noise_type": "idn",
+            "n_flipped": 0,
+            "actual_noise_rate": 0.0,
+        }
+
+    rng = np.random.default_rng(seed)
+    w = rng.standard_normal(size=(n_features, 1))
+    projections = (X_train @ w).flatten()
+    std_proj = np.std(projections) + 1e-8
+    mean_proj = np.mean(projections)
+    norm_proj = (projections - mean_proj) / std_proj
+
+    flip_probs = noise_rate * (1.0 / (1.0 + np.exp(-norm_proj)))
+    flip_probs = np.clip(flip_probs, 0.0, 0.95)
+
+    random_draws = rng.uniform(0.0, 1.0, size=n_total)
+    flip_mask = random_draws < flip_probs
+    flip_indices = np.where(flip_mask)[0]
+
+    for idx in flip_indices:
+        curr_label = y_noisy[idx]
+        other_classes = [c for c in range(n_classes) if c != curr_label]
+        y_noisy[idx] = rng.choice(other_classes)
+
+    n_to_flip = len(flip_indices)
+    actual_rate = n_to_flip / n_total if n_total > 0 else 0.0
+
+    stats = {
+        "noise_type": "idn",
+        "n_flipped": n_to_flip,
+        "actual_noise_rate": actual_rate,
+    }
+    return y_noisy, stats
+
+
+def generate_noise(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    noise_type: str,
+    noise_rate: float,
+    seed: int,
+    n_classes: int = 2,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Master noise generator routing to specific noise models."""
+    noise_type = noise_type.lower().strip()
+    if noise_type in ("none", "clean") or noise_rate == 0.0:
+        return y_train.copy(), {"noise_type": "none", "n_flipped": 0, "actual_noise_rate": 0.0}
+
+    if noise_type in ("asym", "asymmetric"):
+        return inject_asymmetric_noise(y_train, noise_rate, seed)
+    elif noise_type in ("sym", "symmetric"):
+        return inject_symmetric_noise(y_train, noise_rate, seed, n_classes=n_classes)
+    elif noise_type in ("feat", "feature_correlated"):
+        return inject_feature_correlated_noise(X_train, y_train, noise_rate, seed)
+    elif noise_type in ("idn", "instance_dependent"):
+        return inject_instance_dependent_noise(X_train, y_train, noise_rate, seed, n_classes=n_classes)
+    else:
+        raise ValueError(
+            f"Unknown noise_type '{noise_type}'. Valid options: ['none', 'asym', 'sym', 'feat', 'idn']."
+        )

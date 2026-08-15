@@ -1,240 +1,231 @@
-"""Statistical significance testing for CCR-Tabular results.
+"""Statistical significance testing, effect sizes, and FDR correction for CCR-Tabular.
 
-Implements Wilcoxon signed-rank tests comparing CCR against all baselines,
-as required by IEEE TNNLS reviewers. Reports p-values and effect sizes.
+Implements rigorous experimental statistics addressing Reviewer 2 & Reviewer 4 concerns:
+  1. No heterogeneous cross-dataset variance pooling.
+  2. Per-dataset statistics: Mean, standard deviation, 95% confidence intervals.
+  3. Effect sizes:
+     - Cohen's d (parametric effect size)
+     - Cliff's delta (non-parametric effect size)
+     - Absolute and relative percentage delta (Macro F1)
+  4. Hypothesis testing:
+     - Paired Wilcoxon signed-rank test
+     - Paired Student's t-test
+  5. Multiplicity control:
+     - Benjamini-Hochberg False Discovery Rate (FDR) adjustment across all comparisons.
 """
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon
+from scipy import stats
+from scipy.stats import t, wilcoxon
 
 from src.utils.config import OUTPUTS_METRICS
 
 logger = logging.getLogger(__name__)
 
-# Significance threshold (PRD Section 5.3)
+# Default significance level
 ALPHA = 0.05
 
-# Metrics to test (in order of paper importance)
-_TEST_METRICS = ["minority_recall", "macro_f1", "auc_roc", "auc_pr"]
-
-# All baseline model names to compare against CCR
-_BASELINES = [
-    "mlp_standard",
-    "mlp_focal",
-    "mlp_weighted_ce",
-    "mlp_smote",
-    "xgboost_default",
-    "xgboost_weighted",
-    "lightgbm_default",
-]
+_DEFAULT_METRICS = ["macro_f1", "minority_recall", "auc_roc", "auc_pr", "accuracy", "ece", "brier_score"]
 
 
-def run_wilcoxon_tests(
-    results_csv: Optional[Path] = None,
-    noise_type: str = "none",
-    noise_rate: float = 0.0,
-    output_path: Optional[Path] = None,
-) -> pd.DataFrame:
-    """Run Wilcoxon signed-rank tests: CCR vs each baseline.
+def compute_confidence_interval(
+    values: np.ndarray,
+    confidence: float = 0.95,
+) -> Tuple[float, float, float]:
+    """Compute mean and parametric 95% confidence interval using Student's t distribution."""
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[~np.isnan(arr)]
+    n = len(arr)
+    if n == 0:
+        return float("nan"), float("nan"), float("nan")
+    if n == 1:
+        return float(arr[0]), float(arr[0]), float(arr[0])
 
-    For each dataset × metric combination, tests whether CCR scores are
-    significantly different from each baseline's scores across all folds
-    and seeds (15 paired observations per condition).
+    mean = float(np.mean(arr))
+    sem = float(stats.sem(arr))
+    if sem == 0.0:
+        return mean, mean, mean
+
+    h = sem * float(t.ppf((1 + confidence) / 2.0, n - 1))
+    return mean, mean - h, mean + h
+
+
+def compute_cohens_d(x1: np.ndarray, x2: np.ndarray, paired: bool = True) -> float:
+    """Compute Cohen's d effect size between two groups.
 
     Args:
-        results_csv: Path to results.csv. Defaults to outputs/metrics/results.csv.
-        noise_type: Filter to this noise type ('none', 'asym', 'feat').
-        noise_rate: Filter to this noise rate (0.0, 0.1, 0.2, 0.3).
-        output_path: Where to save the significance table CSV.
-            Defaults to outputs/metrics/wilcoxon_<noise_type>_<rate>.csv.
-
-    Returns:
-        DataFrame with columns: dataset, metric, baseline, ccr_mean, baseline_mean,
-        delta, p_value, significant, better.
-
-    Raises:
-        FileNotFoundError: If results.csv does not exist.
-        ValueError: If CCR results are missing for the requested condition.
+        x1: Treatment values (e.g. CCR).
+        x2: Baseline values.
+        paired: If True, computes paired Cohen's d_z = mean(diff) / std(diff).
+                If False, computes independent Cohen's d with pooled standard deviation.
     """
-    if results_csv is None:
-        results_csv = OUTPUTS_METRICS / "results.csv"
+    a1 = np.asarray(x1, dtype=np.float64)
+    a2 = np.asarray(x2, dtype=np.float64)
+    min_len = min(len(a1), len(a2))
+    if min_len < 2:
+        return 0.0
 
-    if not results_csv.exists():
-        raise FileNotFoundError(
-            f"results.csv not found at '{results_csv}'. "
-            f"Run experiments first before computing significance tests."
-        )
+    a1, a2 = a1[:min_len], a2[:min_len]
 
-    df = pd.read_csv(results_csv)
+    if paired:
+        diff = a1 - a2
+        std_diff = np.std(diff, ddof=1)
+        mean_diff = np.mean(diff)
+        if std_diff == 0.0:
+            if mean_diff == 0.0:
+                return 0.0
+            # Fallback to pooled standard deviation when diff is identical across pairs
+            s1, s2 = np.std(a1, ddof=1), np.std(a2, ddof=1)
+            s_pooled = np.sqrt((s1**2 + s2**2) / 2.0)
+            if s_pooled > 0.0:
+                return float(mean_diff / s_pooled)
+            return float(np.sign(mean_diff) * 10.0)
+        return float(mean_diff / std_diff)
+    else:
+        n1, n2 = len(a1), len(a2)
+        s1, s2 = np.std(a1, ddof=1), np.std(a2, ddof=1)
+        s_pooled = np.sqrt(((n1 - 1) * s1**2 + (n2 - 1) * s2**2) / (n1 + n2 - 2))
+        if s_pooled == 0.0:
+            return 0.0
+        return float((np.mean(a1) - np.mean(a2)) / s_pooled)
 
-    # Filter to requested noise condition
-    mask = (df["noise_type"] == noise_type) & (df["noise_rate"].round(3) == round(noise_rate, 3))
-    df_filtered = df[mask].copy()
 
-    if len(df_filtered) == 0:
-        raise ValueError(
-            f"No results found for noise_type='{noise_type}', noise_rate={noise_rate}. "
-            f"Available conditions: {df[['noise_type','noise_rate']].drop_duplicates().to_dict('records')}"
-        )
+def compute_cliffs_delta(x1: np.ndarray, x2: np.ndarray) -> float:
+    """Compute Cliff's delta non-parametric effect size in [-1.0, 1.0]."""
+    a1 = np.asarray(x1, dtype=np.float64)
+    a2 = np.asarray(x2, dtype=np.float64)
+    n1, n2 = len(a1), len(a2)
+    if n1 == 0 or n2 == 0:
+        return 0.0
 
-    ccr_df = df_filtered[df_filtered["model"] == "mlp_ccr"]
-    if len(ccr_df) == 0:
-        raise ValueError(
-            f"No CCR results found for noise_type='{noise_type}', noise_rate={noise_rate}. "
-            f"Run CCR experiments first."
-        )
+    greater = 0
+    less = 0
+    for val1 in a1:
+        greater += np.sum(val1 > a2)
+        less += np.sum(val1 < a2)
+
+    return float((greater - less) / (n1 * n2))
+
+
+def benjamini_hochberg_correction(p_values: List[float], alpha: float = ALPHA) -> Tuple[List[float], List[bool]]:
+    """Apply Benjamini-Hochberg FDR correction to a list of p-values."""
+    p_arr = np.asarray(p_values, dtype=np.float64)
+    m = len(p_arr)
+    if m == 0:
+        return [], []
+
+    sorted_indices = np.argsort(p_arr)
+    sorted_p = p_arr[sorted_indices]
+
+    adj_p = np.zeros(m, dtype=np.float64)
+    running_min = 1.0
+    for i in range(m - 1, -1, -1):
+        rank = i + 1
+        q_val = (m / rank) * sorted_p[i]
+        running_min = min(running_min, q_val)
+        adj_p[i] = min(1.0, running_min)
+
+    original_adj_p = np.zeros(m, dtype=np.float64)
+    original_adj_p[sorted_indices] = adj_p
+    rejected = original_adj_p < alpha
+
+    return original_adj_p.tolist(), rejected.tolist()
+
+
+def analyze_dataset_level_significance(
+    df: pd.DataFrame,
+    primary_model: str = "mlp_ccr",
+    baseline_models: Optional[List[str]] = None,
+    metrics: Optional[List[str]] = None,
+    alpha: float = ALPHA,
+) -> pd.DataFrame:
+    """Perform dataset-level paired statistical analysis with FDR correction."""
+    if metrics is None:
+        metrics = [m for m in _DEFAULT_METRICS if m in df.columns]
+
+    if baseline_models is None:
+        all_models = df["model"].unique().tolist()
+        baseline_models = [m for m in all_models if m != primary_model]
 
     rows = []
-    datasets = df_filtered["dataset"].unique()
 
-    for dataset in sorted(datasets):
-        ccr_dataset = ccr_df[ccr_df["dataset"] == dataset]
+    for dataset in df["dataset"].unique():
+        df_ds = df[df["dataset"] == dataset]
+        df_prim = df_ds[df_ds["model"] == primary_model]
 
-        for baseline in _BASELINES:
-            bl_dataset = df_filtered[
-                (df_filtered["dataset"] == dataset) &
-                (df_filtered["model"] == baseline)
-            ]
+        if len(df_prim) == 0:
+            continue
 
-            if len(bl_dataset) == 0:
-                logger.warning(
-                    f"No results for baseline '{baseline}' on dataset '{dataset}'. Skipping."
-                )
+        for baseline in baseline_models:
+            df_base = df_ds[df_ds["model"] == baseline]
+            if len(df_base) == 0:
                 continue
 
-            for metric in _TEST_METRICS:
-                if metric not in ccr_dataset.columns or metric not in bl_dataset.columns:
+            for metric in metrics:
+                if metric not in df_prim.columns or metric not in df_base.columns:
                     continue
 
-                ccr_scores = ccr_dataset[metric].dropna().values
-                bl_scores = bl_dataset[metric].dropna().values
+                v_prim = df_prim[metric].dropna().values
+                v_base = df_base[metric].dropna().values
+                min_len = min(len(v_prim), len(v_base))
 
-                # Align lengths — pair by position (same fold/seed order)
-                min_len = min(len(ccr_scores), len(bl_scores))
-                if min_len < 5:
-                    logger.warning(
-                        f"Too few paired observations ({min_len}) for "
-                        f"{dataset}/{baseline}/{metric}. Need ≥5. Skipping."
-                    )
+                if min_len < 3:
                     continue
 
-                ccr_scores = ccr_scores[:min_len]
-                bl_scores = bl_scores[:min_len]
+                v_prim_aligned = v_prim[:min_len]
+                v_base_aligned = v_base[:min_len]
 
-                ccr_mean = float(np.mean(ccr_scores))
-                bl_mean = float(np.mean(bl_scores))
-                delta = ccr_mean - bl_mean
+                mean_prim, ci_l_prim, ci_u_prim = compute_confidence_interval(v_prim_aligned)
+                mean_base, ci_l_base, ci_u_base = compute_confidence_interval(v_base_aligned)
 
-                # Wilcoxon signed-rank test (two-sided)
+                abs_delta = mean_prim - mean_base
+                rel_delta_pct = (abs_delta / (abs(mean_base) + 1e-8)) * 100.0
+                cohens_d = compute_cohens_d(v_prim_aligned, v_base_aligned, paired=True)
+                cliffs_d = compute_cliffs_delta(v_prim_aligned, v_base_aligned)
+
                 try:
-                    stat, p_value = wilcoxon(ccr_scores, bl_scores, alternative="two-sided")
-                except ValueError as exc:
-                    # Happens when all differences are zero
-                    logger.warning(
-                        f"Wilcoxon test failed for {dataset}/{baseline}/{metric}: {exc}. "
-                        f"Setting p=1.0."
-                    )
-                    p_value = 1.0
+                    _, p_wilcoxon = wilcoxon(v_prim_aligned, v_base_aligned, alternative="two-sided")
+                except Exception:
+                    p_wilcoxon = 1.0
+
+                try:
+                    _, p_ttest = stats.ttest_rel(v_prim_aligned, v_base_aligned)
+                except Exception:
+                    p_ttest = 1.0
 
                 rows.append({
                     "dataset": dataset,
                     "metric": metric,
-                    "baseline": baseline,
-                    "ccr_mean": round(ccr_mean, 4),
-                    "baseline_mean": round(bl_mean, 4),
-                    "delta": round(delta, 4),
-                    "p_value": round(float(p_value), 4),
-                    "significant": bool(p_value < ALPHA),
-                    "better": bool(delta > 0 and p_value < ALPHA),
+                    "primary_model": primary_model,
+                    "baseline_model": baseline,
+                    "n_runs": min_len,
+                    "primary_mean": round(mean_prim, 4),
+                    "primary_ci95": f"[{ci_l_prim:.4f}, {ci_u_prim:.4f}]",
+                    "baseline_mean": round(mean_base, 4),
+                    "baseline_ci95": f"[{ci_l_base:.4f}, {ci_u_base:.4f}]",
+                    "abs_delta": round(abs_delta, 4),
+                    "rel_delta_pct": round(rel_delta_pct, 2),
+                    "cohens_d": round(cohens_d, 3),
+                    "cliffs_delta": round(cliffs_d, 3),
+                    "p_raw_wilcoxon": float(p_wilcoxon),
+                    "p_raw_ttest": float(p_ttest),
                 })
 
-    result_df = pd.DataFrame(rows)
+    res_df = pd.DataFrame(rows)
+    if len(res_df) == 0:
+        return res_df
 
-    if len(result_df) == 0:
-        logger.warning("No Wilcoxon tests could be computed. Check that results.csv has data.")
-        return result_df
+    q_wilcoxon, rej_wilcoxon = benjamini_hochberg_correction(res_df["p_raw_wilcoxon"].tolist(), alpha=alpha)
+    q_ttest, rej_ttest = benjamini_hochberg_correction(res_df["p_raw_ttest"].tolist(), alpha=alpha)
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-    if output_path is None:
-        rate_str = f"{int(noise_rate * 100):02d}"
-        output_path = OUTPUTS_METRICS / f"wilcoxon_{noise_type}_{rate_str}.csv"
+    res_df["p_fdr_wilcoxon"] = [round(q, 4) for q in q_wilcoxon]
+    res_df["sig_fdr_wilcoxon"] = rej_wilcoxon
+    res_df["p_fdr_ttest"] = [round(q, 4) for q in q_ttest]
+    res_df["sig_fdr_ttest"] = rej_ttest
 
-    result_df.to_csv(output_path, index=False)
-    logger.info(f"Wilcoxon results saved to {output_path}")
-
-    # ── Print summary ─────────────────────────────────────────────────────────
-    _print_significance_summary(result_df, noise_type, noise_rate)
-
-    return result_df
-
-
-def run_all_wilcoxon_tests() -> Dict[str, pd.DataFrame]:
-    """Run Wilcoxon tests for all noise conditions present in results.csv.
-
-    Returns:
-        Dict mapping '<noise_type>_<rate>' to significance DataFrame.
-    """
-    results_csv = OUTPUTS_METRICS / "results.csv"
-    if not results_csv.exists():
-        raise FileNotFoundError(
-            f"results.csv not found. Run experiments first."
-        )
-
-    df = pd.read_csv(results_csv)
-    conditions = df[["noise_type", "noise_rate"]].drop_duplicates()
-
-    all_results = {}
-    for _, row in conditions.iterrows():
-        noise_type = row["noise_type"]
-        noise_rate = float(row["noise_rate"])
-        key = f"{noise_type}_{int(noise_rate * 100):02d}"
-
-        try:
-            result = run_wilcoxon_tests(
-                noise_type=noise_type,
-                noise_rate=noise_rate,
-            )
-            all_results[key] = result
-        except ValueError as exc:
-            logger.warning(f"Skipping condition {key}: {exc}")
-
-    return all_results
-
-
-def _print_significance_summary(
-    result_df: pd.DataFrame,
-    noise_type: str,
-    noise_rate: float,
-) -> None:
-    """Print a compact significance summary table.
-
-    Args:
-        result_df: Wilcoxon results DataFrame.
-        noise_type: Noise type for display.
-        noise_rate: Noise rate for display.
-    """
-    print(f"\n{'='*70}")
-    print(f"Wilcoxon Significance: CCR vs Baselines | {noise_type}@{noise_rate:.0%}")
-    print(f"{'='*70}")
-    print(f"{'Dataset':<12} {'Metric':<18} {'Baseline':<20} {'Delta':>7} {'p':>7} {'Sig':>5}")
-    print(f"{'-'*70}")
-
-    for _, row in result_df.iterrows():
-        sig_marker = "✓" if row["significant"] else " "
-        better_marker = "↑" if row["better"] else ("↓" if row["delta"] < 0 else "=")
-        print(
-            f"{row['dataset']:<12} {row['metric']:<18} {row['baseline']:<20} "
-            f"{row['delta']:>+7.4f} {row['p_value']:>7.4f} {sig_marker}{better_marker}"
-        )
-
-    n_sig = result_df["significant"].sum()
-    n_better = result_df["better"].sum()
-    n_total = len(result_df)
-    print(f"{'-'*70}")
-    print(f"Significant: {n_sig}/{n_total} | CCR better (p<0.05): {n_better}/{n_total}")
-    print(f"{'='*70}\n")
+    return res_df

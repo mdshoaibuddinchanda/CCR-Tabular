@@ -1,17 +1,15 @@
 """Statistical significance testing, effect sizes, and FDR correction for CCR-Tabular.
 
-Implements rigorous experimental statistics addressing Reviewer 2 & Reviewer 4 concerns:
-  1. No heterogeneous cross-dataset variance pooling.
-  2. Per-dataset statistics: Mean, standard deviation, 95% confidence intervals.
+Implements rigorous experimental statistics:
+  1. Primary Statistical Unit: Dataset (D).
+     - Calculates per-dataset matched difference: Delta_d = Metric(CCR, d) - Metric(baseline, d)
+     - Conducts paired hypothesis tests (Wilcoxon Signed-Rank) across independent datasets.
+     - Controls for False Discovery Rate via Benjamini-Hochberg (BH-FDR) across all pairwise comparisons.
+  2. Within-dataset uncertainty estimation: Mean, standard deviation, 95% Student's t confidence intervals.
   3. Effect sizes:
      - Cohen's d (parametric effect size)
      - Cliff's delta (non-parametric effect size)
      - Absolute and relative percentage delta (Macro F1)
-  4. Hypothesis testing:
-     - Paired Wilcoxon signed-rank test
-     - Paired Student's t-test
-  5. Multiplicity control:
-     - Benjamini-Hochberg False Discovery Rate (FDR) adjustment across all comparisons.
 """
 
 import logging
@@ -27,9 +25,7 @@ from src.utils.config import OUTPUTS_METRICS
 
 logger = logging.getLogger(__name__)
 
-# Default significance level
 ALPHA = 0.05
-
 _DEFAULT_METRICS = ["macro_f1", "minority_recall", "auc_roc", "auc_pr", "accuracy", "ece", "brier_score"]
 
 
@@ -56,14 +52,7 @@ def compute_confidence_interval(
 
 
 def compute_cohens_d(x1: np.ndarray, x2: np.ndarray, paired: bool = True) -> float:
-    """Compute Cohen's d effect size between two groups.
-
-    Args:
-        x1: Treatment values (e.g. CCR).
-        x2: Baseline values.
-        paired: If True, computes paired Cohen's d_z = mean(diff) / std(diff).
-                If False, computes independent Cohen's d with pooled standard deviation.
-    """
+    """Compute Cohen's d effect size between two groups."""
     a1 = np.asarray(x1, dtype=np.float64)
     a2 = np.asarray(x2, dtype=np.float64)
     min_len = min(len(a1), len(a2))
@@ -79,7 +68,6 @@ def compute_cohens_d(x1: np.ndarray, x2: np.ndarray, paired: bool = True) -> flo
         if std_diff == 0.0:
             if mean_diff == 0.0:
                 return 0.0
-            # Fallback to pooled standard deviation when diff is identical across pairs
             s1, s2 = np.std(a1, ddof=1), np.std(a2, ddof=1)
             s_pooled = np.sqrt((s1**2 + s2**2) / 2.0)
             if s_pooled > 0.0:
@@ -113,119 +101,154 @@ def compute_cliffs_delta(x1: np.ndarray, x2: np.ndarray) -> float:
 
 
 def benjamini_hochberg_correction(p_values: List[float], alpha: float = ALPHA) -> Tuple[List[float], List[bool]]:
-    """Apply Benjamini-Hochberg FDR correction to a list of p-values."""
+    """Apply Benjamini-Hochberg False Discovery Rate (BH-FDR) procedure."""
     p_arr = np.asarray(p_values, dtype=np.float64)
     m = len(p_arr)
     if m == 0:
         return [], []
 
-    sorted_indices = np.argsort(p_arr)
-    sorted_p = p_arr[sorted_indices]
+    p_clean = np.where(np.isnan(p_arr), 1.0, p_arr)
+    sorted_indices = np.argsort(p_clean)
+    sorted_p = p_clean[sorted_indices]
 
-    adj_p = np.zeros(m, dtype=np.float64)
-    running_min = 1.0
-    for i in range(m - 1, -1, -1):
-        rank = i + 1
-        q_val = (m / rank) * sorted_p[i]
-        running_min = min(running_min, q_val)
-        adj_p[i] = min(1.0, running_min)
+    adjusted_p = np.zeros(m, dtype=np.float64)
+    adjusted_p[-1] = sorted_p[-1]
+    for i in range(m - 2, -1, -1):
+        adjusted_p[i] = min(adjusted_p[i + 1], sorted_p[i] * m / (i + 1))
+    adjusted_p = np.clip(adjusted_p, 0.0, 1.0)
 
-    original_adj_p = np.zeros(m, dtype=np.float64)
-    original_adj_p[sorted_indices] = adj_p
-    rejected = original_adj_p < alpha
+    original_adjusted = np.zeros(m, dtype=np.float64)
+    original_adjusted[sorted_indices] = adjusted_p
+    significant = (original_adjusted < alpha).tolist()
 
-    return original_adj_p.tolist(), rejected.tolist()
+    return original_adjusted.tolist(), significant
 
 
 def analyze_dataset_level_significance(
     df: pd.DataFrame,
-    primary_model: str = "mlp_ccr",
-    baseline_models: Optional[List[str]] = None,
-    metrics: Optional[List[str]] = None,
+    metric: str = "macro_f1",
+    reference_model: str = "ccr",
     alpha: float = ALPHA,
 ) -> pd.DataFrame:
-    """Perform dataset-level paired statistical analysis with FDR correction."""
-    if metrics is None:
-        metrics = [m for m in _DEFAULT_METRICS if m in df.columns]
+    """Primary statistical inference using Dataset as the independent observational unit.
 
-    if baseline_models is None:
-        all_models = df["model"].unique().tolist()
-        baseline_models = [m for m in all_models if m != primary_model]
+    For each noise regime:
+      1. Aggregates matched fold/seed results to obtain per-dataset mean performance.
+      2. Computes per-dataset difference: Delta_d = Metric(CCR, d) - Metric(baseline, d).
+      3. Tests cross-dataset significance using Paired Wilcoxon Signed-Rank Test.
+      4. Adjusts p-values across all competing baselines using Benjamini-Hochberg FDR.
+    """
+    if df.empty or metric not in df.columns:
+        return pd.DataFrame()
 
-    rows = []
+    # Aggregate to dataset-level mean per condition
+    ds_means = (
+        df.groupby(["dataset", "noise_type", "noise_rate", "model"])[metric]
+        .mean()
+        .reset_index()
+    )
 
-    for dataset in df["dataset"].unique():
-        df_ds = df[df["dataset"] == dataset]
-        df_prim = df_ds[df_ds["model"] == primary_model]
-
-        if len(df_prim) == 0:
+    records = []
+    for (n_type, n_rate), group in ds_means.groupby(["noise_type", "noise_rate"]):
+        piv = group.pivot(index="dataset", columns="model", values=metric)
+        if reference_model not in piv.columns:
             continue
 
-        for baseline in baseline_models:
-            df_base = df_ds[df_ds["model"] == baseline]
-            if len(df_base) == 0:
+        ref_vals = piv[reference_model].dropna()
+
+        for base_model in piv.columns:
+            if base_model == reference_model:
                 continue
 
-            for metric in metrics:
-                if metric not in df_prim.columns or metric not in df_base.columns:
-                    continue
+            common_ds = piv[[reference_model, base_model]].dropna()
+            if len(common_ds) < 3:
+                continue
 
-                v_prim = df_prim[metric].dropna().values
-                v_base = df_base[metric].dropna().values
-                min_len = min(len(v_prim), len(v_base))
+            ref_series = common_ds[reference_model].values
+            base_series = common_ds[base_model].values
+            diff = ref_series - base_series
 
-                if min_len < 3:
-                    continue
+            mean_delta = float(np.mean(diff))
+            median_delta = float(np.median(diff))
+            cohens_d = compute_cohens_d(ref_series, base_series, paired=True)
+            cliffs_d = compute_cliffs_delta(ref_series, base_series)
 
-                v_prim_aligned = v_prim[:min_len]
-                v_base_aligned = v_base[:min_len]
+            # 95% Confidence Interval across datasets
+            _, ci_lower, ci_upper = compute_confidence_interval(diff, confidence=0.95)
 
-                mean_prim, ci_l_prim, ci_u_prim = compute_confidence_interval(v_prim_aligned)
-                mean_base, ci_l_base, ci_u_base = compute_confidence_interval(v_base_aligned)
+            # Paired Wilcoxon signed-rank test across independent datasets
+            try:
+                if np.all(diff == 0.0):
+                    stat, p_val = 0.0, 1.0
+                else:
+                    stat, p_val = wilcoxon(ref_series, base_series, alternative="two-sided")
+                    stat, p_val = float(stat), float(p_val)
+            except Exception:
+                stat, p_val = float("nan"), 1.0
 
-                abs_delta = mean_prim - mean_base
-                rel_delta_pct = (abs_delta / (abs(mean_base) + 1e-8)) * 100.0
-                cohens_d = compute_cohens_d(v_prim_aligned, v_base_aligned, paired=True)
-                cliffs_d = compute_cliffs_delta(v_prim_aligned, v_base_aligned)
+            records.append({
+                "noise_type": n_type,
+                "noise_rate": n_rate,
+                "metric": metric,
+                "reference_model": reference_model,
+                "baseline_model": base_model,
+                "n_datasets": len(common_ds),
+                "mean_delta": round(mean_delta, 4),
+                "median_delta": round(median_delta, 4),
+                "ci_95_lower": round(ci_lower, 4),
+                "ci_95_upper": round(ci_upper, 4),
+                "cohens_d": round(cohens_d, 3),
+                "cliffs_delta": round(cliffs_d, 3),
+                "wilcoxon_stat": round(stat, 2) if not np.isnan(stat) else None,
+                "raw_p_value": p_val,
+            })
 
-                try:
-                    _, p_wilcoxon = wilcoxon(v_prim_aligned, v_base_aligned, alternative="two-sided")
-                except Exception:
-                    p_wilcoxon = 1.0
+    if not records:
+        return pd.DataFrame()
 
-                try:
-                    _, p_ttest = stats.ttest_rel(v_prim_aligned, v_base_aligned)
-                except Exception:
-                    p_ttest = 1.0
+    res_df = pd.DataFrame(records)
 
-                rows.append({
-                    "dataset": dataset,
-                    "metric": metric,
-                    "primary_model": primary_model,
-                    "baseline_model": baseline,
-                    "n_runs": min_len,
-                    "primary_mean": round(mean_prim, 4),
-                    "primary_ci95": f"[{ci_l_prim:.4f}, {ci_u_prim:.4f}]",
-                    "baseline_mean": round(mean_base, 4),
-                    "baseline_ci95": f"[{ci_l_base:.4f}, {ci_u_base:.4f}]",
-                    "abs_delta": round(abs_delta, 4),
-                    "rel_delta_pct": round(rel_delta_pct, 2),
-                    "cohens_d": round(cohens_d, 3),
-                    "cliffs_delta": round(cliffs_d, 3),
-                    "p_raw_wilcoxon": float(p_wilcoxon),
-                    "p_raw_ttest": float(p_ttest),
-                })
+    # Multiplicity adjustment across all baseline comparisons per noise regime
+    all_adj_p = []
+    all_sig = []
+    for _, group in res_df.groupby(["noise_type", "noise_rate"]):
+        p_vals = group["raw_p_value"].tolist()
+        adj_p, sig = benjamini_hochberg_correction(p_vals, alpha=alpha)
+        all_adj_p.extend(adj_p)
+        all_sig.extend(sig)
 
-    res_df = pd.DataFrame(rows)
-    if len(res_df) == 0:
-        return res_df
-
-    q_wilcoxon, rej_wilcoxon = benjamini_hochberg_correction(res_df["p_raw_wilcoxon"].tolist(), alpha=alpha)
-    q_ttest, rej_ttest = benjamini_hochberg_correction(res_df["p_raw_ttest"].tolist(), alpha=alpha)
-
-    res_df["p_fdr_wilcoxon"] = [round(q, 4) for q in q_wilcoxon]
-    res_df["sig_fdr_wilcoxon"] = rej_wilcoxon
-    res_df["p_fdr_ttest"] = [round(q, 4) for q in q_ttest]
-    res_df["sig_fdr_ttest"] = rej_ttest
+    res_df["fdr_p_value"] = [round(p, 5) for p in all_adj_p]
+    res_df["significant_fdr"] = all_sig
 
     return res_df
+
+
+def compute_within_dataset_summary(
+    df: pd.DataFrame,
+    metrics: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Compute per-dataset fold/seed descriptive statistics (Mean, Std, 95% CI)."""
+    if metrics is None:
+        metrics = _DEFAULT_METRICS
+
+    valid_metrics = [m for m in metrics if m in df.columns]
+    summary_rows = []
+
+    for (ds, m_name, n_type, n_rate), grp in df.groupby(["dataset", "model", "noise_type", "noise_rate"]):
+        row = {
+            "dataset": ds,
+            "model": m_name,
+            "noise_type": n_type,
+            "noise_rate": n_rate,
+            "n_runs": len(grp),
+        }
+        for m in valid_metrics:
+            vals = grp[m].dropna().values
+            mean, ci_low, ci_high = compute_confidence_interval(vals)
+            row[f"{m}_mean"] = round(mean, 4)
+            row[f"{m}_std"] = round(float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0, 4)
+            row[f"{m}_ci95_low"] = round(ci_low, 4)
+            row[f"{m}_ci95_high"] = round(ci_high, 4)
+        summary_rows.append(row)
+
+    return pd.DataFrame(summary_rows)

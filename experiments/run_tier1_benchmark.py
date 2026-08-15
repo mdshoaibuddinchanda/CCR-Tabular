@@ -48,7 +48,7 @@ def run_tier1_benchmark(
     models: Optional[List[str]] = None,
     noise_configs: Optional[List[tuple]] = None,
     seeds: Optional[List[int]] = None,
-    n_folds: int = N_FOLDS,
+    n_folds: int = 3,
 ) -> pd.DataFrame:
     """Run core 10-dataset master benchmark."""
     if datasets is None:
@@ -56,7 +56,6 @@ def run_tier1_benchmark(
     if models is None:
         models = [
             "ce", "wce", "focal", "gce", "sce", "elr",
-            "norm_wce", "norm_focal", "norm_gce", "norm_sce",
             "ccr_no_norm", "ccr",
         ]
     if noise_configs is None:
@@ -65,11 +64,9 @@ def run_tier1_benchmark(
             ("asym", 0.20),
             ("asym", 0.40),
             ("sym", 0.20),
-            ("feat", 0.20),
-            ("idn", 0.20),
         ]
     if seeds is None:
-        seeds = SEEDS
+        seeds = [42, 123]
 
     out_csv = OUTPUTS_METRICS / "tier1_core10_results.csv"
     logger.info(f"Starting Tier 1 Master Benchmark on 10 Core Datasets: {datasets}...")

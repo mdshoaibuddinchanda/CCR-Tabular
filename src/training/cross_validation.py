@@ -40,6 +40,9 @@ def run_cross_validation(
     n_folds: int = N_FOLDS,
     instrument_batch: bool = False,
     results_path: Optional[Path] = None,
+    batch_size: int = 128,
+    device: Optional[Any] = None,
+    use_amp: Optional[bool] = None,
 ) -> pd.DataFrame:
     """Run full stratified cross-validation.
 
@@ -107,6 +110,7 @@ def run_cross_validation(
             )
 
             # Preprocessing (fit on train fold ONLY)
+            n_classes = len(np.unique(y))
             (
                 X_tr_np, X_val_np, X_test_np,
                 y_tr_np, y_val_np, y_test_np,
@@ -114,6 +118,7 @@ def run_cross_validation(
             ) = preprocess_split(
                 X_tr_df, X_val_df, X_test_df,
                 pd.Series(y_tr), pd.Series(y_val), pd.Series(y_test_raw),
+                allow_multiclass=(n_classes > 2),
             )
 
             # Noise injection (training split ONLY)
@@ -144,6 +149,9 @@ def run_cross_validation(
                 instrument_batch=instrument_batch,
                 run_id=run_id,
                 clean_y_train=y_tr_np,
+                batch_size=batch_size,
+                device=device,
+                use_amp=use_amp,
             )
 
             # Evaluate on untouched test fold

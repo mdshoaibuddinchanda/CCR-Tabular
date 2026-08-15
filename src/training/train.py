@@ -83,6 +83,9 @@ def train_one_fold(
     instrument_batch: bool = False,
     run_id: Optional[str] = None,
     clean_y_train: Optional[np.ndarray] = None,
+    batch_size: int = BATCH_SIZE,
+    device: Optional[torch.device] = None,
+    use_amp: Optional[bool] = None,
 ) -> Tuple[Any, Dict[str, float]]:
     """Train a model on a single fold."""
     fix_all_seeds(seed)
@@ -99,7 +102,7 @@ def train_one_fold(
         config_dict={
             "tau": tau, "beta": beta, "K": K_hist,
             "architecture": architecture, "optimizer": optimizer_name,
-            "batch_size": BATCH_SIZE, "max_epochs": MAX_EPOCHS,
+            "batch_size": batch_size, "max_epochs": MAX_EPOCHS,
             "lr": lr, "weight_decay": weight_decay,
             "early_stop_patience": EARLY_STOP_PATIENCE,
         },
@@ -124,16 +127,13 @@ def train_one_fold(
         )
     else:
         model, best_metrics = _train_neural_model(
-            loss_name=model_name,
-            architecture=architecture,
+            model_name=model_name,
             dataset_name=dataset_name,
             X_train=X_train,
             y_train=y_train,
             X_val=X_val,
             y_val=y_val,
-            seed=seed,
-            run_id=run_id,
-            run_logger=run_logger,
+            architecture=architecture,
             optimizer_name=optimizer_name,
             lr=lr,
             weight_decay=weight_decay,
@@ -141,7 +141,11 @@ def train_one_fold(
             beta=beta,
             K_hist=K_hist,
             instrument_batch=instrument_batch,
+            run_id=run_id,
             clean_y_train=clean_y_train,
+            batch_size=batch_size,
+            device=device,
+            use_amp=use_amp,
         )
 
     # Record profiling
@@ -178,9 +182,16 @@ def _train_neural_model(
     K_hist: int = K,
     instrument_batch: bool = False,
     clean_y_train: Optional[np.ndarray] = None,
+    batch_size: int = BATCH_SIZE,
+    device: Optional[torch.device] = None,
+    use_amp: Optional[bool] = None,
 ) -> Tuple[Any, Dict[str, float]]:
     """Train neural model with configurable architecture, loss, optimizer, and telemetry."""
-    device = get_device()
+    if device is None:
+        device = get_device()
+    if use_amp is None:
+        use_amp = (device.type == "cuda")
+
     n_samples, input_dim = X_train.shape
     num_classes = len(np.unique(np.concatenate([y_train, y_val])))
 
@@ -213,7 +224,7 @@ def _train_neural_model(
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     train_dataset = TabularDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
 
     instrumenter = BatchInstrumenter(run_id=run_id, enabled=instrument_batch)
 
@@ -234,15 +245,16 @@ def _train_neural_model(
             idx_batch = idx_batch.to(device)
 
             optimizer.zero_grad()
-            logits = model(X_batch)
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                logits = model(X_batch)
 
-            # Compute loss
-            if hasattr(criterion, "target_history") or "sample_indices" in criterion.forward.__code__.co_varnames:
-                loss = criterion(logits, y_batch, sample_indices=idx_batch, current_epoch=epoch)
-            elif hasattr(criterion, "update_history") or "current_epoch" in criterion.forward.__code__.co_varnames:
-                loss = criterion(logits, y_batch, idx_batch, epoch)
-            else:
-                loss = criterion(logits, y_batch)
+                # Compute loss
+                if hasattr(criterion, "target_history") or "sample_indices" in criterion.forward.__code__.co_varnames:
+                    loss = criterion(logits, y_batch, sample_indices=idx_batch, current_epoch=epoch)
+                elif hasattr(criterion, "update_history") or "current_epoch" in criterion.forward.__code__.co_varnames:
+                    loss = criterion(logits, y_batch, idx_batch, epoch)
+                else:
+                    loss = criterion(logits, y_batch)
 
             if torch.isnan(loss):
                 break

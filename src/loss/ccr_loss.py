@@ -248,6 +248,27 @@ class CCRLoss(nn.Module):
         history_slice = self.history[sample_indices][:, cols]  # [B, n_filled]
         return history_slice.var(dim=1)  # [B]
 
+    def compute_weights(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        sample_indices: torch.Tensor,
+        current_epoch: int = 0,
+    ) -> torch.Tensor:
+        """Compute detached raw sample weights w_i."""
+        batch_size = logits.shape[0]
+        if batch_size == 0:
+            return torch.empty(0, device=logits.device)
+        with torch.no_grad():
+            probs = F.softmax(logits.detach(), dim=1)
+            p_i = probs[torch.arange(batch_size, device=logits.device), targets]
+            focal_term = 1.0 - p_i
+            variance = self._compute_variance(sample_indices, current_epoch)
+            confidence_gate = (p_i > self.tau).float()
+            variance_term = self.beta * variance * confidence_gate
+            gamma = self.class_weights[targets]
+            return focal_term + variance_term + gamma
+
     def _compute_class_weights(self, class_counts: List[int]) -> torch.Tensor:
         """Compute normalized inverse class frequency weights."""
         inv_counts = torch.tensor(

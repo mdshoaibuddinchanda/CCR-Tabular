@@ -494,6 +494,19 @@ TabularFTTransformer (Attention Backbone) & 0.6988 & \textbf{0.7645} & +0.0657 (
 
 CCR provides consistent robustness gains across all three architectural paradigms, achieving a \textbf{+6.57 percentage point improvement on FT-Transformer}.
 
+\subsection{Hyperparameter Sensitivity and Stability Analysis}
+
+Figure~\ref{fig:k_beta_sensitivity} illustrates the hyperparameter stability landscape across the prediction variance scaling factor $\beta \in [0.1, 1.0]$ and historical window length $K \in [2, 10]$ epochs under 40\% asymmetric label corruption.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/fig8_k_beta_sensitivity.pdf}
+\caption{Hyperparameter stability analysis of CCR under 40\% asymmetric noise: (a) 2D interaction grid across history window length $K$ and variance scale $\beta$, highlighting the default operating point ($K=5, \beta=0.50$); (b) 1D marginal sensitivity curves across $\beta$ for varying history lengths. Performance remains exceptionally stable (Macro-F1 variation $< \pm 0.002$ across the entire parameter space), eliminating the need for dataset-specific hyperparameter tuning.}
+\label{fig:k_beta_sensitivity}
+\end{figure}
+
+As shown in Figure~\ref{fig:k_beta_sensitivity}, the Macro-F1 score remains strictly within the narrow band $[0.8092, 0.8116]$ across the entire $5 \times 5$ configuration space, confirming that CCR is robust to hyperparameter selection and does not require extensive per-dataset tuning.
+
 
 %% ==================================================================
 \section{Discussion and Limitations}

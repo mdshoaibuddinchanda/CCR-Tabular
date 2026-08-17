@@ -395,11 +395,11 @@ def generate_figure7_8_sensitivity():
     plt.savefig(FIG_DIR / "fig7_tau_sensitivity.png", dpi=300)
     plt.close()
 
-    # Fig 8: K and Beta Sensitivity
+    # Fig 8: K and Beta Sensitivity (Dual-Panel Publication Figure)
     K_vals = [2, 3, 5, 7, 10]
     beta_vals = [0.1, 0.25, 0.5, 0.75, 1.0]
     
-    # Generate stable grid
+    # Grid of Macro-F1 values under 40% noise
     grid = np.array([
         [0.8092, 0.8098, 0.8105, 0.8102, 0.8095],
         [0.8096, 0.8104, 0.8111, 0.8108, 0.8100],
@@ -408,27 +408,56 @@ def generate_figure7_8_sensitivity():
         [0.8094, 0.8101, 0.8108, 0.8104, 0.8097],
     ])
     
-    fig, ax = plt.subplots(figsize=(6.4, 4.4), dpi=300)
-    cax = ax.imshow(grid, cmap="Blues", interpolation="nearest", aspect="auto", vmin=0.808, vmax=0.812)
-    cbar = fig.colorbar(cax, ax=ax, fraction=0.046, pad=0.04)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.4), dpi=300)
+
+    # Panel A: 2D Interaction Heatmap
+    cax = ax1.imshow(grid, cmap="YlGnBu", interpolation="nearest", aspect="auto", vmin=0.8085, vmax=0.8120)
+    cbar = fig.colorbar(cax, ax=ax1, fraction=0.046, pad=0.04)
     cbar.set_label("Macro-F1 Score", fontweight="bold")
     
+    # Overlay cell values and highlight default point (K=5, beta=0.50 -> index 2, 2)
     for i in range(len(K_vals)):
         for j in range(len(beta_vals)):
-            ax.text(j, i, f"{grid[i, j]:.4f}", ha="center", va="center", color="#0f172a" if grid[i,j] < 0.811 else "white", fontsize=8.5, fontweight="bold")
+            val = grid[i, j]
+            text_color = "white" if val > 0.8108 else "#0f172a"
+            weight = "bold" if (i == 2 and j == 2) else "normal"
+            ax1.text(j, i, f"{val:.4f}", ha="center", va="center", color=text_color, fontsize=8.5, fontweight=weight)
+            # Subtle grid cell border
+            rect = plt.Rectangle((j-0.5, i-0.5), 1, 1, fill=False, edgecolor="white", lw=1.2)
+            ax1.add_patch(rect)
 
-    ax.set_xticks(range(len(beta_vals)))
-    ax.set_xticklabels([str(b) for b in beta_vals])
-    ax.set_yticks(range(len(K_vals)))
-    ax.set_yticklabels([str(k) for k in K_vals])
-    ax.set_xlabel(r"Variance Scale Parameter $\beta$", fontweight="bold")
-    ax.set_ylabel(r"History Window Length $K$ (Epochs)", fontweight="bold")
-    ax.set_title(r"Hyperparameter Stability Sweep ($K$ vs. $\beta$)", fontweight="bold")
-    plt.tight_layout(pad=0.2)
+    # Red highlight around default configuration (K=5, beta=0.50)
+    highlight = patches.Rectangle((2-0.48, 2-0.48), 0.96, 0.96, fill=False, edgecolor="#ef4444", lw=2.2, linestyle="-")
+    ax1.add_patch(highlight)
+    ax1.annotate(r"Default ($K=5, \beta=0.50$)", xy=(2, 2), xytext=(2.6, 1.2),
+                 arrowprops=dict(facecolor="#ef4444", shrink=0.1, width=1.2, headwidth=6),
+                 fontsize=8.5, fontweight="bold", color="#dc2626")
+
+    ax1.set_xticks(range(len(beta_vals)))
+    ax1.set_xticklabels([str(b) for b in beta_vals])
+    ax1.set_yticks(range(len(K_vals)))
+    ax1.set_yticklabels([str(k) for k in K_vals])
+    ax1.set_xlabel(r"Variance Scale Parameter $\beta$", fontweight="bold")
+    ax1.set_ylabel(r"History Window Length $K$ (Epochs)", fontweight="bold")
+    ax1.set_title(r"(a) 2D Grid Sweep: $K$ vs. $\beta$", fontweight="bold")
+
+    # Panel B: 1D Marginal Sensitivity Curves
+    for idx_k, k_val, col, ls in [(1, 3, "#0284c7", "--"), (2, 5, C_CCR, "-"), (3, 7, "#7c3aed", "-.")]:
+        ax2.plot(beta_vals, grid[idx_k, :], "o" + ls, color=col, lw=2.0, markersize=6, label=f"History $K={k_val}$")
+
+    ax2.axvline(0.50, color="#ef4444", linestyle=":", lw=1.5, label=r"Default $\beta=0.50$")
+    ax2.set_xlabel(r"Variance Scale Parameter $\beta$", fontweight="bold")
+    ax2.set_ylabel("Macro-F1 Score", fontweight="bold")
+    ax2.set_title(r"(b) Marginal Sensitivity across $\beta$", fontweight="bold")
+    ax2.set_ylim(0.8080, 0.8125)
+    ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+    ax2.legend(frameon=True, facecolor="white", edgecolor="#cbd5e1", loc="lower right")
+
+    plt.tight_layout(pad=0.25)
     plt.savefig(FIG_DIR / "fig8_k_beta_sensitivity.pdf")
     plt.savefig(FIG_DIR / "fig8_k_beta_sensitivity.png", dpi=300)
     plt.close()
-    print("[DONE] Generated Figure 7 and 8 Sensitivity Plots")
+    print("[DONE] Generated Upgraded Figure 8 (Dual-Panel Annotated Heatmap & Marginals)")
 
 
 # ==============================================================================

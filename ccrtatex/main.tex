@@ -76,7 +76,7 @@ Standard loss functions and modern neural architectures respond pathologically t
 \begin{enumerate}
     \item \textbf{Loss Penalty Paradox}: Standard Cross-Entropy (CE) and Focal Loss~\cite{lin2017focal} assign large loss values and heavy gradient magnitudes to mislabeled minority samples, treating corrupted instances as ``hard informative examples'' and forcing the neural network to memorize false labels.
     \item \textbf{Class-Weighting Failure}: Traditional Inverse-Class Weighting (WCE) up-weights every nominally minority sample by $1/N_c$. While this combats class imbalance, it catastrophically scales the gradients of corrupted instances, destabilizing parameter updates.
-    \item \textbf{Tree Ensemble Vulnerability}: Gradient-boosted decision trees rely on greedy recursive split selection. Under asymmetric corruption, tree models rapidly overfit to noisy boundary regions, causing minority recall to collapse from $>0.70$ on clean data to $<0.40$ under 40\% corruption.
+    \item \textbf{Tree Ensemble Vulnerability}: Gradient-boosted decision trees rely on greedy recursive split selection. Under asymmetric corruption, tree models rapidly overfit to noisy boundary regions, causing minority recall to collapse from $>0.70$ on clean data to approximately 0.39--0.42 under 40\% corruption (0.3897 for LightGBM, 0.4080 for CatBoost, and 0.4156 for XGBoost).
 \end{enumerate}
 
 \subsection{Disentangling Dynamic Reweighting from Optimization Scale}
@@ -442,7 +442,7 @@ Ionosphere & \textbf{0.8495} & 0.8395 & 0.8218 & 0.8390 & 0.7447 & 0.7410 & 0.81
 }
 \end{table*}
 
-Detailed per-dataset Macro-F1 scores under 40\% asymmetric noise across diverse domains are available in the Supplementary Appendix (Table~\ref{tab:per_dataset}). On Bank Marketing, CCR improves Macro-F1 by \textbf{15.17 percentage points (27.0\% relative improvement)} over standard CE ($0.7136$ vs.\ $0.5619$). On Adult Census, CCR provides a \textbf{10.90 percentage point (16.34\% relative improvement)} gain ($0.7761$ vs.\ $0.6671$).
+Table~\ref{tab:per_dataset} reports detailed per-dataset Macro-F1 scores under 40\% asymmetric noise across all 10 Core benchmark datasets. On Bank Marketing, CCR improves Macro-F1 by \textbf{15.17 percentage points (27.0\% relative improvement)} over standard CE ($0.7136$ vs.\ $0.5619$). On Adult Census, CCR provides a \textbf{10.90 percentage point (16.34\% relative improvement)} gain ($0.7761$ vs.\ $0.6671$).
 
 \subsection{Statistical Significance Analysis}
 
@@ -513,7 +513,7 @@ Asym $40\%$ & $[0.327, 0.884]$ & $0.856$ & 0.740 & \textbf{0.412} (-44.3\%) & 32
 \label{fig:gradient_attribution}
 \end{figure*}
 
-As shown in Table~\ref{tab:telemetry}, real tabular batches consistently exhibit \emph{weight deflation} ($S/B < 1.0$) rather than inflation, because confidence weighting $(1 - p_{i, y_i})$ depresses the majority of samples. Batch normalization rescales these deflated gradients toward unity, eliminating gradient attenuation and reducing gradient norm volatility ($\mathrm{Grad~CV}$) by 10\%--35\%. Furthermore, corrupted gradient mass $R_{\mathrm{noise}}$ drops from 32.8\% in standard CE to 24.5\% in CCR, supporting Hypothesis 1.
+As shown in Table~\ref{tab:telemetry}, real tabular batches predominantly exhibit \emph{weight deflation}, with most observed $S/B$ values below 1.0 and only limited excursions above 1.0 (up to $1.022$ on clean batches), because confidence weighting $(1 - p_{i, y_i})$ depresses the majority of samples. Batch normalization rescales these deflated weights toward unity, reducing batch-dependent gradient attenuation and lowering gradient norm volatility ($\mathrm{Grad~CV}$) by 10\%--35\%. Furthermore, corrupted gradient mass $R_{\mathrm{noise}}$ drops from 32.8\% in standard CE to 24.5\% in CCR, supporting Hypothesis 1.
 
 \subsection{Optimizer Dynamics and Normalization Benefits}
 
@@ -580,7 +580,7 @@ Table~\ref{tab:transfer_and_generalization} reports Macro-F1 across three distin
 }
 \end{table*}
 
-CCR provides consistent robustness gains across all three architectural paradigms, achieving a \textbf{+6.57 percentage point improvement on FT-Transformer}.
+Architecture-transfer values are aggregated across the five predefined representative datasets (Adult, Bank, Credit-G, Phoneme, Spambase); multiclass and clinical results are reported under their respective evaluation protocols. CCR provides consistent robustness gains across all three architectural paradigms, achieving a \textbf{+6.57 percentage point improvement on FT-Transformer}.
 
 \subsection{Hyperparameter Sensitivity and Stability Analysis}
 

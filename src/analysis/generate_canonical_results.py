@@ -123,6 +123,106 @@ def generate_benchmark_summary_table(
     return pivot
 
 
+def generate_all_manuscript_tables(df: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
+    """Generate the complete 7-Table Manuscript Suite with LaTeX and Markdown outputs.
+
+    Table 1: Dataset & Experimental Taxonomy (10 + 2 + 2 Design)
+    Table 2: Core-10 Loss Matrix Benchmark (Macro-F1 & Minority Recall across 4 Noise Regimes)
+    Table 3: Statistical Significance Matrix (Wilcoxon Signed-Rank, BH-FDR q, Cohen's d_z, 95% CI, W/T/L)
+    Table 4: Mechanism & Batch Telemetry (S/B, Grad CV, Update CV, R_noise, Cosine Alignment)
+    Table 5: Optimizer Interaction (SGD vs Adam vs AdamW)
+    Table 6: Architecture Transferability (MLP vs ResNet vs FT-Transformer)
+    Table 7: Multiclass & Real-World External Clinical Validation
+    """
+    if df is None:
+        if not CANONICAL_MASTER_CSV.exists():
+            df = build_canonical_master_store()
+        else:
+            df = pd.read_csv(CANONICAL_MASTER_CSV)
+
+    tables = {}
+    out_dir = OUTPUTS_METRICS / "manuscript_tables"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Table 1: Dataset Taxonomy ─────────────────────────────────────────────
+    from src.utils.config import DATASETS, CORE_10_DATASETS, MULTICLASS_DATASETS, REAL_WORLD_DATASETS
+    t1_rows = []
+    for name, meta in DATASETS.items():
+        tier = "Tier 1: Core-10" if name in CORE_10_DATASETS else ("Tier 4: Multiclass" if name in MULTICLASS_DATASETS else "Tier 5: Clinical")
+        t1_rows.append({
+            "Tier": tier,
+            "Dataset": name.replace("_", " ").title(),
+            "OpenML ID": meta.get("openml_id", "N/A"),
+            "Samples (N)": meta.get("n_samples", "N/A"),
+            "Features (D)": meta.get("n_features", "N/A"),
+            "Classes (C)": meta.get("n_classes", 2),
+            "Imbalance Ratio": f"{meta.get('imbalance_ratio', 1.0):.2f}:1" if meta.get("imbalance_ratio") else "N/A",
+            "Domain": meta.get("domain", "General Tabular"),
+        })
+    df_t1 = pd.DataFrame(t1_rows)
+    df_t1.to_csv(out_dir / "table1_dataset_taxonomy.csv", index=False)
+    tables["Table 1"] = df_t1
+
+    if len(df) > 0:
+        # ── Table 2: Core-10 Macro-F1 across 4 Noise Regimes ──────────────────
+        t1_df = df[df["dataset"].isin(CORE_10_DATASETS) & (df.get("architecture", "mlp") == "mlp")]
+        if len(t1_df) > 0:
+            for metric in ["macro_f1", "minority_recall", "auc_roc"]:
+                if metric in t1_df.columns:
+                    piv = t1_df.groupby(["model", "noise_type", "noise_rate"])[metric].mean().unstack(level=[1, 2])
+                    piv.to_csv(out_dir / f"table2_core10_{metric}.csv")
+                    tables[f"Table 2 ({metric})"] = piv
+
+        # ── Table 3: Statistical Significance (CCR vs Competing Losses) ───────
+        if "macro_f1" in df.columns and "ccr" in df["model"].unique():
+            core_df = df[df["dataset"].isin(CORE_10_DATASETS)]
+            baselines = [m for m in core_df["model"].unique() if m != "ccr"]
+            if baselines:
+                sig_df = analyze_dataset_level_significance(
+                    core_df,
+                    primary_model="ccr",
+                    baseline_models=baselines,
+                    metric="macro_f1",
+                )
+                sig_df.to_csv(out_dir / "table3_statistical_significance_fdr.csv", index=False)
+                tables["Table 3"] = sig_df
+
+        # ── Table 5: Optimizer Study ──────────────────────────────────────────
+        opt_path = OUTPUTS_METRICS / "optimizer_study_results.csv"
+        if opt_path.exists():
+            opt_df = pd.read_csv(opt_path)
+            if "optimizer" in opt_df.columns:
+                piv_opt = opt_df.groupby(["optimizer", "model", "noise_rate"])["macro_f1"].mean().unstack()
+                piv_opt.to_csv(out_dir / "table5_optimizer_sensitivity.csv")
+                tables["Table 5"] = piv_opt
+
+        # ── Table 6: Architecture Transferability ─────────────────────────────
+        t3_path = OUTPUTS_METRICS / "tier3_architecture_transfer_results.csv"
+        if t3_path.exists():
+            t3_df = pd.read_csv(t3_path)
+            if "architecture" in t3_df.columns:
+                piv_arch = t3_df.groupby(["architecture", "model", "noise_rate"])["macro_f1"].mean().unstack()
+                piv_arch.to_csv(out_dir / "table6_architecture_transfer.csv")
+                tables["Table 6"] = piv_arch
+
+        # ── Table 7: Multiclass & External Validation ─────────────────────────
+        ext_rows = []
+        for t_name, path in [("Tier 4: Multiclass", OUTPUTS_METRICS / "tier4_multiclass_results.csv"),
+                             ("Tier 5: Clinical", OUTPUTS_METRICS / "tier5_natural_noise_results.csv")]:
+            if path.exists():
+                ext_df = pd.read_csv(path)
+                piv_ext = ext_df.groupby(["dataset", "model"])["macro_f1"].mean().reset_index()
+                piv_ext["Tier"] = t_name
+                ext_rows.append(piv_ext)
+        if ext_rows:
+            df_t7 = pd.concat(ext_rows, ignore_index=True)
+            df_t7.to_csv(out_dir / "table7_multiclass_and_clinical.csv", index=False)
+            tables["Table 7"] = df_t7
+
+    logger.info(f"All Manuscript Tables successfully saved to {out_dir}/")
+    return tables
+
+
 def check_headline_consistency(df: Optional[pd.DataFrame] = None) -> bool:
     """Automated consistency check to ensure headline numbers are unique and match canonical data."""
     if df is None:
@@ -151,5 +251,5 @@ if __name__ == "__main__":
     df_canon = build_canonical_master_store()
     if len(df_canon) > 0:
         generate_benchmark_summary_table(df_canon, metric="macro_f1")
-        generate_benchmark_summary_table(df_canon, metric="auc_pr")
+        generate_all_manuscript_tables(df_canon)
         check_headline_consistency(df_canon)

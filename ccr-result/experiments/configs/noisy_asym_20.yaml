@@ -1,0 +1,38 @@
+datasets:
+- adult
+- default_credit
+- credit_fraud
+- bank
+- aps_failure
+- covertype
+- higgs
+- electricity
+- kddcup99
+- spambase
+- ionosphere
+- phoneme
+- magic
+- breast_cancer
+- heart_disease
+- diabetes
+- mammography
+- sonar
+- mushroom
+- census_kdd
+models:
+- mlp_standard
+- mlp_focal
+- mlp_weighted_ce
+- mlp_smote
+- xgboost_default
+- xgboost_weighted
+- lightgbm_default
+- tabnet
+- ft_transformer
+- mlp_ccr
+noise_type: asym
+noise_rate: 0.2
+n_folds: 5
+seeds:
+- 42
+- 2026

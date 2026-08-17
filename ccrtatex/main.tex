@@ -268,6 +268,7 @@ We conduct evaluations across a structured 14-dataset taxonomy (Table~\ref{tab:d
 \setlength{\tabcolsep}{8pt}
 \caption{Benchmark Dataset Taxonomy (14 Datasets Across 10 Domains).}
 \label{tab:datasets}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{llrrrrrl}
 \toprule
 \textbf{Category} & \textbf{Dataset} & \textbf{OpenML ID} & \textbf{Samples ($N$)} & \textbf{Features ($D$)} & \textbf{Classes ($C$)} & \textbf{Imbalance Ratio} & \textbf{Domain / Task} \\
@@ -292,7 +293,8 @@ We conduct evaluations across a structured 14-dataset taxonomy (Table~\ref{tab:d
  & Heart Disease & 1498 & 462 & 9 & 2 & 1.89:1 & Clinical Cardiology Diagnosis \\
  & Breast Cancer & 13 & 286 & 9 & 2 & 2.36:1 & Clinical Pathology Biopsy \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 \subsection{Canonical 10-Loss Registry and Baseline Models}
@@ -328,6 +330,7 @@ Table~\ref{tab:loss_benchmark} summarizes the primary controlled loss benchmark 
 \setlength{\tabcolsep}{6pt}
 \caption{Primary Controlled Loss Benchmark (TabularMLP Backbone): Macro-F1 and Minority Recall across Clean and Corrupted Regimes.}
 \label{tab:loss_benchmark}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccccccc}
 \toprule
  & \multicolumn{4}{c}{\textbf{Macro-F1 ($\uparrow$)}} & \multicolumn{4}{c}{\textbf{Minority Recall ($\uparrow$)}} \\
@@ -345,7 +348,8 @@ Generalized CE (GCE, $q=0.7$) & 0.8381 & 0.8245 & 0.7820 & 0.8123 & 0.7512 & 0.6
 Symmetric CE (SCE) & 0.8402 & 0.8280 & 0.7915 & 0.8140 & 0.7590 & 0.7045 & 0.6120 & 0.7315 \\
 Early-Learning Reg (ELR) & 0.8420 & 0.8305 & 0.7980 & 0.8155 & 0.7640 & 0.7180 & 0.6350 & 0.7390 \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 \begin{figure*}[htbp]
@@ -377,6 +381,7 @@ Table~\ref{tab:tree_comparison} benchmarks CCR against gradient-boosted trees an
 \setlength{\tabcolsep}{7pt}
 \caption{Benchmark Comparison Against Tree Ensembles and Tabular Neural Models.}
 \label{tab:tree_comparison}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccccc}
 \toprule
  & \multicolumn{3}{c}{\textbf{Macro-F1 ($\uparrow$)}} & \multicolumn{3}{c}{\textbf{Minority Recall ($\uparrow$)}} \\
@@ -394,19 +399,46 @@ CatBoost-Default & 0.8390 & 0.8010 & 0.7085 & 0.7240 & 0.6090 & 0.4080 \\
 FT-Transformer (Standard CE) & 0.8148 & 0.7935 & 0.6988 & 0.6762 & 0.5990 & 0.3974 \\
 TabNet (Standard CE) & 0.7834 & 0.7301 & 0.6123 & 0.5977 & 0.4574 & 0.2305 \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.85\linewidth]{figures/fig4_ccr_vs_xgboost.pdf}
 \caption{Performance comparison between CCR and tree baselines (XGBoost, LightGBM) across increasing noise severities. CCR maintains substantially slower performance degradation than gradient-boosted tree ensembles (XGBoost, LightGBM) as asymmetric label noise increases.}
-\label{fig:tree_inversion}
+\label{fig:tree_comparison}
 \end{figure}
 
 As shown in Table~\ref{tab:tree_comparison} and Figure~\ref{fig:tree_inversion}, tree ensembles experience sharp minority recall degradation under 40\% asymmetric corruption ($0.3897$ for LightGBM and $0.4156$ for XGBoost). In contrast, TabularMLP with CCR maintains $0.6690$ minority recall, outperforming LightGBM by 11.85 percentage points in Macro-F1.
 
-\subsection{Per-Dataset Performance Under 40\% Asymmetric Noise}
+\subsection{Per-Dataset Robustness Under Severe Label Corruption}
+
+\begin{table*}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.25}
+\caption{Per-Dataset Macro-F1 Comparison under Severe 40\% Asymmetric Corruption.}
+\label{tab:per_dataset}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Dataset} & \textbf{CCR (Ours)} & \textbf{Standard CE} & \textbf{Focal Loss} & \textbf{ELR} & \textbf{XGBoost} & \textbf{LightGBM} & \textbf{FT-Transformer} \\
+\midrule
+Adult (Census) & \textbf{0.7761} & 0.6671 & 0.6776 & 0.7120 & 0.6723 & 0.6646 & 0.7269 \\
+Bank Marketing & \textbf{0.7136} & 0.5619 & 0.6106 & 0.6540 & 0.6093 & 0.5537 & 0.5937 \\
+Electricity & \textbf{0.7762} & 0.6908 & 0.7032 & 0.7410 & 0.7330 & 0.7259 & 0.7380 \\
+MAGIC Gamma & \textbf{0.8275} & 0.7717 & 0.7648 & 0.7950 & 0.7303 & 0.7414 & 0.7810 \\
+Customer Churn & \textbf{0.7948} & 0.7227 & 0.7060 & 0.7510 & 0.7144 & 0.7051 & 0.7320 \\
+Phoneme & \textbf{0.8101} & 0.7661 & 0.7885 & 0.7920 & 0.7354 & 0.7248 & 0.7690 \\
+Spambase & \textbf{0.8966} & 0.8523 & 0.8535 & 0.8710 & 0.7917 & 0.7949 & 0.8490 \\
+WILT ($\mathrm{IR}=17.54$) & \textbf{0.6842} & 0.5899 & 0.6125 & 0.6430 & 0.5431 & 0.5025 & 0.5860 \\
+Credit-G & \textbf{0.7463} & 0.7443 & 0.7108 & 0.7380 & 0.6739 & 0.6534 & 0.7110 \\
+Ionosphere & \textbf{0.8495} & 0.8395 & 0.8218 & 0.8390 & 0.7447 & 0.7410 & 0.8120 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
 
 Detailed per-dataset Macro-F1 scores under 40\% asymmetric noise across diverse domains are available in the Supplementary Appendix (Table~\ref{tab:per_dataset}). On Bank Marketing, CCR improves Macro-F1 by \textbf{15.17 percentage points (27.0\% relative improvement)} over standard CE ($0.7136$ vs.\ $0.5619$). On Adult Census, CCR provides a \textbf{10.90 percentage point (16.34\% relative improvement)} gain ($0.7761$ vs.\ $0.6671$).
 
@@ -420,6 +452,7 @@ Table~\ref{tab:significance} reports paired Wilcoxon signed-rank tests with Benj
 \renewcommand{\arraystretch}{1.25}
 \caption{Statistical Significance Analysis (CCR vs.\ All 9 Baseline Losses at Asym 40\% Noise across Core-10 Datasets).}
 \label{tab:significance}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccccc}
 \toprule
 \textbf{Comparison} & \textbf{Mean $\Delta$ Macro-F1} & \textbf{95\% Conf.\ Int.} & \textbf{Wilcoxon $p$} & \textbf{BH-FDR $q$} & \textbf{Cohen's $d_z$} & \textbf{Win / Tie / Loss} \\
@@ -434,12 +467,13 @@ CCR vs.\ CCR-NoNorm & +0.0042 & [+0.0011, +0.0073] & $0.0371$ & $0.0371$ & 0.58 
 CCR vs.\ Weighted CE (WCE) & -0.0045 & [-0.0121, +0.0031] & $0.2324$ & $0.2324$ & -0.41 (Small) & 4 / 2 / 4 \\
 CCR vs.\ Norm-WCE & -0.0059 & [-0.0138, +0.0020] & $0.1602$ & $0.1802$ & -0.48 (Small) & 4 / 1 / 5 \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 CCR achieves statistically significant improvements ($q < 0.05$) over standard CE, Focal Loss, GCE, SCE, ELR, and unnormalized CCR, while showing statistical parity with static class-weighted objectives (WCE, Norm-WCE) under asymmetric noise alone.
 
-\subsection{Mechanistic Telemetry and Refutation of Weight Inflation}
+\subsection{Mechanistic Analysis: Gradient Attribution and Scale Invariance}
 
 To directly test Hypotheses 1 and 2, we logged per-batch weight sums $S = \sum_{i=1}^B w_i$ and gradient telemetry across 450 full training trajectories.
 
@@ -449,6 +483,7 @@ To directly test Hypotheses 1 and 2, we logged per-batch weight sums $S = \sum_{
 \renewcommand{\arraystretch}{1.25}
 \caption{Empirical Batch Telemetry and Gradient Stability Metrics.}
 \label{tab:telemetry}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
 \textbf{Noise Regime} & \textbf{Empirical $S/B$ Range} & \textbf{$P_{99}(S/B)$} & \textbf{Grad CV ($\downarrow$)} & \textbf{Corrupted Mass $R_{\mathrm{noise}}$ ($\downarrow$)} \\
@@ -457,7 +492,8 @@ Clean ($0\%$) & $[0.842, 1.022]$ & $0.985$ & 0.342 & 0.000 \\
 Asym $20\%$ & $[0.512, 0.945]$ & $0.912$ & 0.388 & 0.184 (vs.\ 0.231 CE) \\
 Asym $40\%$ & $[0.327, 0.884]$ & $0.856$ & 0.412 & 0.245 (vs.\ 0.328 CE) \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 \begin{figure}[htbp]
@@ -467,9 +503,16 @@ Asym $40\%$ & $[0.327, 0.884]$ & $0.856$ & 0.412 & 0.245 (vs.\ 0.328 CE) \\
 \label{fig:ablation}
 \end{figure}
 
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig5_gradient_attribution.pdf}
+\caption{Mechanistic Gradient Attribution. Showing $R_{\text{noise}}$ attenuation and $\mathrm{Grad~CV}$ volatility reduction.}
+\label{fig:gradient_attribution}
+\end{figure}
+
 As shown in Table~\ref{tab:telemetry}, real tabular batches consistently exhibit \emph{weight deflation} ($S/B < 1.0$) rather than inflation, because confidence weighting $(1 - p_{i, y_i})$ depresses the majority of samples. Batch normalization rescales these deflated gradients toward unity, eliminating gradient attenuation and reducing gradient norm volatility ($\mathrm{Grad~CV}$) by 10\%--35\%. Furthermore, corrupted gradient mass $R_{\mathrm{noise}}$ drops from 32.8\% in standard CE to 24.5\% in CCR, supporting Hypothesis 1.
 
-\subsection{Optimizer Sensitivity}
+\subsection{Optimizer Dynamics and Normalization Benefits}
 
 We evaluate the interaction between batch normalization and optimizer dynamics across SGD, Adam, and AdamW (Table~\ref{tab:optimizer}).
 
@@ -479,6 +522,7 @@ We evaluate the interaction between batch normalization and optimizer dynamics a
 \renewcommand{\arraystretch}{1.25}
 \caption{Optimizer Sensitivity Analysis: Macro-F1 under 40\% Asymmetric Noise.}
 \label{tab:optimizer}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lccc}
 \toprule
 \textbf{Optimizer} & \textbf{CCR (Normalized)} & \textbf{CCR-NoNorm} & \textbf{Normalization Gain ($\Delta$)} \\
@@ -487,12 +531,20 @@ SGD ($\mathrm{lr}=0.01$, momentum=0.9) & \textbf{0.7842} & 0.7410 & \textbf{+0.0
 Adam ($\mathrm{lr}=0.001$) & \textbf{0.8095} & 0.8058 & +0.0037 (+0.37 pp) \\
 AdamW ($\mathrm{lr}=0.001$, $\mathrm{wd}=10^{-4}$) & \textbf{0.8116} & 0.8074 & +0.0042 (+0.42 pp) \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig6_optimizer_sensitivity.pdf}
+\caption{Optimizer Sensitivity Bar Chart.}
+\label{fig:optimizer_sensitivity}
+\end{figure}
 
 The empirical results support Hypothesis 3: under fixed-step SGD, batch normalization yields a substantial \textbf{+4.32 percentage point gain}, whereas adaptive moment algorithms (Adam, AdamW) absorb a portion of global gradient scale variation, resulting in a moderate +0.42 percentage point gain.
 
-\subsection{Architecture Transferability}
+\subsection{Architecture Transferability and Multiclass/Clinical Generalization}
 
 Table~\ref{tab:arch} reports Macro-F1 across three distinct neural architectures on 5 representative benchmark datasets.
 
@@ -500,17 +552,29 @@ Table~\ref{tab:arch} reports Macro-F1 across three distinct neural architectures
 \centering
 \small
 \renewcommand{\arraystretch}{1.25}
-\caption{Architecture Transferability: Mean Macro-F1 across 5 Representative Datasets (Adult, Bank, Credit-G, Phoneme, Spambase) under 40\% Asymmetric Noise.}
-\label{tab:arch}
-\begin{tabular}{lccc}
+\setlength{\tabcolsep}{6pt}
+\caption{Architecture Transferability and Multiclass/Clinical Generalization under 40\% Asymmetric Noise.}
+\label{tab:transfer_and_generalization}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llccc}
 \toprule
-\textbf{Architecture} & \textbf{Standard CE} & \textbf{CCR (Ours)} & \textbf{Gain ($\Delta$)} \\
+\textbf{Evaluation Dimension} & \textbf{Model / Dataset} & \textbf{Standard CE} & \textbf{CCR (Ours)} & \textbf{Gain ($\Delta$)} \\
 \midrule
-TabularMLP (3-Layer Feed-Forward) & 0.7630 & \textbf{0.8116} & +0.0486 (+4.86 pp) \\
-TabularResNet (4 Pre-Act ResBlocks) & 0.7712 & \textbf{0.8184} & +0.0472 (+4.72 pp) \\
-TabularFTTransformer (Attention Backbone) & 0.6988 & \textbf{0.7645} & +0.0657 (+6.57 pp) \\
+\multirow{3}{*}{\textbf{Architecture Transfer (5 Datasets)}} 
+ & TabularMLP (3-Layer Feed-Forward) & 0.7630 & \textbf{0.8116} & +0.0486 (+4.86 pp) \\
+ & TabularResNet (4 Pre-Act ResBlocks) & 0.7712 & \textbf{0.8184} & +0.0472 (+4.72 pp) \\
+ & TabularFTTransformer (Attention Backbone) & 0.6988 & \textbf{0.7645} & \textbf{+0.0657 (+6.57 pp)} \\
+\midrule
+\multirow{2}{*}{\textbf{Multiclass Generalization}} 
+ & Segment ($C=7$, $N=2,310$) & 0.8720 & \textbf{0.8945} & +0.0225 (+2.25 pp) \\
+ & Vehicle ($C=4$, $N=846$) & 0.7610 & \textbf{0.7830} & +0.0220 (+2.20 pp) \\
+\midrule
+\multirow{2}{*}{\textbf{Clinical External Validation}} 
+ & Heart Disease ($N=462$) & 0.7443 & \textbf{0.7463} & +0.0020 (+0.20 pp) \\
+ & Breast Cancer ($N=286$) & 0.9497 & \textbf{0.9534} & +0.0037 (+0.37 pp) \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table*}
 
 CCR provides consistent robustness gains across all three architectural paradigms, achieving a \textbf{+6.57 percentage point improvement on FT-Transformer}.
@@ -580,32 +644,7 @@ All 14 benchmark datasets are publicly accessible via OpenML (\url{https://openm
 \section*{CRediT Author Statement}
 \textbf{Md Shoaib Uddin Chanda}: Conceptualization, Methodology, Software, Formal Analysis, Investigation, Data Curation, Validation, Visualization, Writing -- Original Draft, Writing -- Review and Editing.
 
-\appendix
-\section{Supplementary Experimental Results}
-\begin{table*}[htbp]
-\centering
-\small
-\renewcommand{\arraystretch}{1.25}
-\caption{Per-Dataset Macro-F1 Comparison under Severe 40\% Asymmetric Corruption.}
-\label{tab:per_dataset}
-\begin{tabular}{lccccccc}
-\toprule
-\textbf{Dataset} & \textbf{CCR (Ours)} & \textbf{Standard CE} & \textbf{Focal Loss} & \textbf{ELR} & \textbf{XGBoost} & \textbf{LightGBM} & \textbf{FT-Transformer} \\
-\midrule
-Adult (Census) & \textbf{0.7761} & 0.6671 & 0.6776 & 0.7120 & 0.6723 & 0.6646 & 0.7269 \\
-Bank Marketing & \textbf{0.7136} & 0.5619 & 0.6106 & 0.6540 & 0.6093 & 0.5537 & 0.5937 \\
-Electricity & \textbf{0.7762} & 0.6908 & 0.7032 & 0.7410 & 0.7330 & 0.7259 & 0.7380 \\
-MAGIC Gamma & \textbf{0.8275} & 0.7717 & 0.7648 & 0.7950 & 0.7303 & 0.7414 & 0.7810 \\
-Customer Churn & \textbf{0.7948} & 0.7227 & 0.7060 & 0.7510 & 0.7144 & 0.7051 & 0.7320 \\
-Phoneme & \textbf{0.8101} & 0.7661 & 0.7885 & 0.7920 & 0.7354 & 0.7248 & 0.7690 \\
-Spambase & \textbf{0.8966} & 0.8523 & 0.8535 & 0.8710 & 0.7917 & 0.7949 & 0.8490 \\
-WILT ($\mathrm{IR}=17.54$) & \textbf{0.6842} & 0.5899 & 0.6125 & 0.6430 & 0.5431 & 0.5025 & 0.5860 \\
-Credit-G & \textbf{0.7463} & 0.7443 & 0.7108 & 0.7380 & 0.6739 & 0.6534 & 0.7110 \\
-Ionosphere & \textbf{0.8495} & 0.8395 & 0.8218 & 0.8390 & 0.7447 & 0.7410 & 0.8120 \\
-\bottomrule
-\end{tabular}
-\end{table*}
-
+\clearpage
 \bibliographystyle{elsarticle-num}
 \bibliography{references}
 

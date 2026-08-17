@@ -31,7 +31,7 @@
 
 \begin{frontmatter}
 
-\title{When Reweighting Meets Scale Invariance: Robust Tabular Neural Classification Under Label Noise and Class Imbalance}
+\title{When Labels Lie and Classes Skew: Robust Tabular Deep Learning via Confidence-Calibrated Reweighting}
 
 \author[aff1]{Md Shoaib Uddin Chanda}
 \ead{mdshoaibuddinchanda@gmail.com}
@@ -44,7 +44,7 @@
 
 %% ------------------------------------------------------------------
 \begin{abstract}
-Deep neural networks applied to real-world tabular data routinely encounter two concurrent degradation sources: severe class imbalance and asymmetric label noise. While standard loss functions treat corrupted labels as hard examples and paradoxically amplify their gradient contributions, existing noise-robust formulations fail to account for class imbalance or batch-composition-dependent optimization volatility. In this paper, we establish that \emph{dynamic confidence-aware reweighting is the principal driver of predictive robustness under label noise, while per-batch weight normalization eliminates batch-dependent global gradient scaling and enhances optimization stability}. We formulate \emph{Confidence-Calibrated Reweighting} (CCR), an autograd-detached loss that integrates confidence-inverse penalties, historical prediction variance gating, and static class weighting, combined with an invariant batch normalization operator enforcing $\frac{1}{B}\sum_{i=1}^B \hat{w}_i \equiv 1.0$. We prove an analytical theoretical supremum bound $S/B \le 2.125$ and refute the prior hypothesis of $3\text{--}4\times$ real-world weight inflation through comprehensive batch telemetry ($S/B \in [0.327, 1.022]$ with $P_{99} \le 0.96$). Across a rigorous $10+2+2$ benchmark taxonomy spanning 10 Core binary datasets, 2 multiclass tasks ($C \ge 3$), and 2 clinical real-world external validations evaluated against 10 canonical loss functions and gradient-boosted trees (XGBoost, LightGBM, CatBoost), CCR demonstrates decisive robustness under severe 40\% asymmetric corruption: it preserves minority-class recall at 0.6690 versus 0.5478 for Cross-Entropy (a 12.12 percentage point / 22.1\% relative improvement) and $< 0.40$ for tree ensembles, while improving Macro-F1 by 4.86 percentage points (6.37\% relative) over Cross-Entropy with no meaningful clean-data penalty (+0.15 percentage points). Mechanistic gradient attribution confirms that CCR actively depresses corrupted-sample gradient mass ($R_{\mathrm{noise}}$ down by 15\%--25\%) and reduces gradient norm volatility by 10\%--35\%. Finally, architecture transferability experiments across TabularMLP, TabularResNet, and FT-Transformer confirm consistent cross-architectural stabilization.
+Deep neural networks applied to real-world tabular data routinely encounter two compounding failure modes: severe class imbalance and asymmetric label corruption. While standard loss functions treat mislabeled minority instances as hard examples and paradoxically amplify their gradient contributions, existing noise-robust objectives overlook class imbalance and suffer from batch-composition-dependent optimization volatility. In this paper, we establish that \emph{dynamic confidence-aware reweighting is the principal driver of predictive robustness under label noise, while per-batch weight normalization eliminates batch-dependent global gradient scaling and enhances optimization stability}. We formulate \emph{Confidence-Calibrated Reweighting} (CCR), an autograd-detached loss that integrates confidence-inverse penalties, historical prediction variance gating, and static class weighting, paired with an invariant batch normalization operator that numerically enforces a unit batch-mean weight up to the stabilizing $\epsilon$. We derive an analytical supremum bound $\sup(S/B) \le 2.125$ and refute the prior hypothesis of $3\text{--}4\times$ real-world weight inflation through comprehensive batch telemetry ($S/B \in [0.327, 1.022]$ with $P_{99} \le 0.96$). Across a structured $10+2+2$ benchmark taxonomy spanning 10 Core binary datasets, 2 multiclass tasks ($C \ge 3$), and 2 clinical real-world external validations evaluated against 9 baseline loss formulations and tree ensembles (XGBoost, LightGBM, CatBoost), CCR substantially mitigates minority-class recall degradation under severe 40\% asymmetric corruption: it preserves minority-class recall at 0.6690 versus 0.5478 for Cross-Entropy (a 12.12 percentage point / 22.1\% relative improvement) and $< 0.40$ for tree ensembles, while improving Macro-F1 by 4.86 percentage points (6.37\% relative) over Cross-Entropy with no meaningful clean-data penalty (+0.15 percentage points). Mechanistic gradient attribution provides empirical evidence that CCR attenuates corrupted-sample gradient mass ($R_{\mathrm{noise}}$ down by 15\%--25\%) and reduces gradient norm volatility by 10\%--35\%. Finally, architecture transferability experiments demonstrate consistent robustness gains across the evaluated neural backbones (TabularMLP, TabularResNet, FT-Transformer).
 \end{abstract}
 
 \begin{keyword}
@@ -60,14 +60,14 @@ tabular deep learning \sep label noise \sep class imbalance \sep dynamic sample 
 
 Tabular data remains the foundation of high-stakes predictive systems across financial risk assessment, medical diagnosis, fraud detection, and industrial fault monitoring. In clean-data regimes with rotationally non-invariant feature structures, gradient-boosted decision trees (GBDTs) such as XGBoost~\cite{chen2016xgboost}, LightGBM~\cite{ke2017lightgbm}, and CatBoost~\cite{prokhorenkova2018catboost} have traditionally demonstrated superior empirical performance over deep neural networks~\cite{grinsztajn2022why,gorishniy2021revisiting}. However, production tabular environments routinely depart from clean benchmark conditions: training datasets frequently suffer from concurrent \emph{class imbalance} (where positive events are rare) and \emph{asymmetric label noise} (where ambiguous or rare positive cases are systematically misannotated as negative)~\cite{frenay2014classification,he2009learning}.
 
-\begin{figure}[htbp]
+\begin{figure*}[htbp]
 \centering
-\includegraphics[width=\linewidth]{figures/fig1_schematic.png}
-\caption{Overview of the Confidence-Calibrated Reweighting (CCR) end-to-end training and evaluation framework. Raw tabular records undergo stratified cross-validation and fold-local preprocessing with noise injected strictly on training splits. Dynamic weights are computed via confidence-inverse penalties, historical prediction variance, and class balance, detached from autograd, and normalized per-batch ($\frac{1}{B}\sum \hat{w}_i \equiv 1.0$) to stabilize gradient updates prior to clean held-out evaluation.}
+\includegraphics[width=\linewidth]{figures/fig1_schematic.pdf}
+\caption{Overview of the Confidence-Calibrated Reweighting (CCR) end-to-end training and evaluation framework. Raw tabular records undergo stratified 5-fold cross-validation and fold-local preprocessing with noise injected strictly on training splits. Dynamic weights are computed via confidence-inverse penalties, historical prediction variance, and class balance, detached from autograd, and normalized per-batch ($\frac{1}{B}\sum \hat{w}_i \approx 1.0$) to stabilize gradient updates prior to clean held-out evaluation.}
 \label{fig:schematic}
-\end{figure}
+\end{figure*}
 
-\subsection{The Joint Failure Mode of Imbalance and Asymmetric Noise}
+\subsection{The Compounding Degradation of Imbalance and Asymmetric Noise}
 
 When class imbalance and label noise co-occur, they trigger a compounding failure mode for standard classification objectives. Consider an asymmetric noise regime where minority instances are corrupted to the majority class at a conditional transition rate $\varepsilon \in [0.10, 0.40]$. Under severe corruption, the effective minority learning signal is depleted while the majority class is contaminated with false negatives.
 
@@ -78,24 +78,24 @@ Standard loss functions and modern neural architectures respond pathologically t
     \item \textbf{Tree Ensemble Vulnerability}: Gradient-boosted decision trees rely on greedy recursive split selection. Under asymmetric corruption, tree models rapidly overfit to noisy boundary regions, causing minority recall to collapse from $>0.70$ on clean data to $<0.40$ under 40\% corruption.
 \end{enumerate}
 
-\subsection{Separating Dynamic Reweighting from Batch Scale Stabilization}
+\subsection{Disentangling Dynamic Reweighting from Optimization Scale}
 
-Prior literature on dynamic sample reweighting~\cite{ren2018learning,kumar2010self} has often confounded two distinct mechanisms: the \emph{per-sample directional redistribution of learning signal} and the \emph{aggregate global scaling of the parameter update step}. In this work, we disentangle these components and establish a clear causal taxonomy:
+Prior literature on dynamic sample reweighting~\cite{ren2018learning,kumar2010self} has often confounded two distinct mechanisms: the \emph{per-sample directional redistribution of learning signal} and the \emph{aggregate global scaling of the parameter update step}. In this work, we separate these components:
 \begin{itemize}
     \item \textbf{Directional Reweighting as the Source of Robustness}: Dynamic confidence-aware down-weighting actively suppresses the gradient contributions of corrupted and overconfident samples, protecting minority-class decision boundaries.
-    \item \textbf{Batch Normalization as a Global Scale Invariant}: Normalizing sample weights such that their mini-batch mean equals unity ($\frac{1}{B}\sum_{i=1}^B \hat{w}_i \equiv 1.0$) eliminates batch-composition-dependent gradient norm fluctuations, ensuring that the effective optimization step size remains invariant to the instantaneous fraction of noisy or minority instances in a batch.
+    \item \textbf{Batch Normalization as a Global Scale Invariant}: Normalizing sample weights such that their mini-batch mean equals unity ($\frac{1}{B}\sum_{i=1}^B \hat{w}_i \approx 1.0$) eliminates batch-composition-dependent gradient norm fluctuations, ensuring that the effective optimization step size remains stable regardless of the instantaneous fraction of noisy or minority instances in a batch.
 \end{itemize}
 
-Crucially, through extensive empirical telemetry across 450 real-world training runs, we refute earlier theoretical conjectures of $3\text{--}4\times$ weight inflation. We show that real tabular training exhibits weight deflation ($S/B \in [0.327, 1.022]$), and we derive an exact analytical supremum bound proving that $S/B \le 2.125$ under all possible probability and variance conditions.
+Crucially, through extensive empirical telemetry across 450 real-world training runs, we refute earlier theoretical conjectures of $3\text{--}4\times$ weight inflation. We show that real tabular training exhibits weight deflation ($S/B \in [0.327, 1.022]$), and we derive an analytical supremum bound showing that $S/B \le 2.125$ under all possible probability and variance conditions.
 
 \subsection{Summary of Contributions}
 
 \begin{enumerate}
     \item \textbf{Methodological Formulation}: We present \emph{Confidence-Calibrated Reweighting} (CCR), an autograd-detached loss function that dynamically integrates confidence-inverse weighting, historical prediction variance gating, and static class balancing, stabilized by an invariant batch normalization operator.
-    \item \textbf{Mathematical Rigor}: We provide exact analytical gradient derivations matching the implementation, prove the theoretical supremum bound $S/B \le 2.125$, and establish the scale-invariance property under stochastic gradient descent.
-    \item \textbf{Mechanistic Evidence}: Through 4-panel per-sample gradient attribution and Lorenz concentration curves, we prove that CCR depresses corrupted-sample gradient mass ($R_{\mathrm{noise}}$) by 15\%--25\% and reduces gradient norm coefficient of variation ($\mathrm{Grad~CV}$) by 10\%--35\%.
-    \item \textbf{Comprehensive 14-Dataset Benchmark}: Evaluated across a structured $10+2+2$ hierarchy (10 Core binary benchmarks, 2 multiclass tasks, and 2 clinical real-world external validations) against 10 canonical loss functions, CCR demonstrates decisive minority recall preservation (0.6690 vs.\ 0.5478 for CE, a 12.12 percentage point / 22.1\% relative improvement) and a 4.86 percentage point Macro-F1 improvement under 40\% asymmetric corruption with zero clean penalty.
-    \item \textbf{Architecture and Optimizer Transfer}: We evaluate CCR across three neural backbones (TabularMLP, TabularResNet, TabularFTTransformer) and three optimizers (SGD, Adam, AdamW), mapping the precise regimes where normalization provides maximum optimization benefit.
+    \item \textbf{Analytical Properties}: We provide exact analytical gradient derivations matching the implementation, derive the theoretical supremum bound $S/B \le 2.125$, and establish the scale-invariance property under stochastic gradient descent.
+    \item \textbf{Mechanistic Evidence}: Through per-sample gradient attribution and Lorenz concentration curves, we show that CCR attenuates corrupted-sample gradient mass ($R_{\mathrm{noise}}$) by 15\%--25\% and reduces gradient norm coefficient of variation ($\mathrm{Grad~CV}$) by 10\%--35\%.
+    \item \textbf{Comprehensive 14-Dataset Benchmark}: Evaluated across a structured $10+2+2$ hierarchy (10 Core binary benchmarks, 2 multiclass tasks, and 2 clinical real-world external validations) against 9 loss baselines, CCR demonstrates decisive minority recall preservation (0.6690 vs.\ 0.5478 for CE, a 12.12 percentage point / 22.1\% relative improvement) and a 4.86 percentage point Macro-F1 improvement under 40\% asymmetric corruption with zero clean penalty.
+    \item \textbf{Architecture and Optimizer Transfer}: We evaluate CCR across three neural backbones (TabularMLP, TabularResNet, TabularFTTransformer) and three optimizers (SGD, Adam, AdamW), mapping the regimes where normalization provides maximum optimization benefit.
 \end{enumerate}
 
 
@@ -110,7 +110,7 @@ Despite the dominance of deep neural networks in computer vision and natural lan
 Class imbalance is traditionally addressed through data-level resampling or cost-sensitive loss formulations. Data-level techniques such as SMOTE~\cite{chawla2002smote} synthesize minority instances via nearest-neighbor interpolation in feature space. While effective under clean conditions, SMOTE creates synthetic points along corrupted boundaries when labels are noisy, severely amplifying label contamination~\cite{he2009learning,lemaitre2017imbalanced}. Cost-sensitive loss functions such as Inverse-Class Weighting (WCE) and Class-Balanced Loss~\cite{cui2019class} assign static multipliers $\gamma_c \propto 1/N_c$. Focal Loss~\cite{lin2017focal} introduces a dynamic modulating factor $(1 - p_{i, y_i})^\gamma$ to focus learning on hard examples; however, under label noise, corrupted samples produce the largest $(1 - p_{i, y_i})$ values, inadvertently maximizing the gradient contribution of false labels.
 
 \subsection{Learning with Noisy Labels}
-Robust learning under label noise has been extensively studied in computer vision~\cite{frenay2014classification}. Common paradigms include robust loss design, sample selection, and regularization. Generalized Cross-Entropy (GCE)~\cite{zhang2018generalized} balances mean absolute error ($L_q$) and cross-entropy to achieve bounded gradient scaling. Symmetric Cross-Entropy (SCE)~\cite{wang2019symmetric} combines standard CE with Reverse Cross-Entropy ($\ell_{\mathrm{RCE}} = -\sum_k p_k \log q_k$) to enforce symmetric robustness. Early-Learning Regularization (ELR)~\cite{liu2020early} prevents the memorization of corrupted labels by penalizing deviations from temporal moving-average predictions. Sample-selection frameworks such as Co-teaching~\cite{han2018coteaching} and DivideMix~\cite{li2020dividemix} maintain dual networks to filter clean samples. However, these methods are designed for balanced multi-class vision tasks and degrade severely when applied to imbalanced tabular regimes.
+Robust learning under label noise has been extensively studied in computer vision~\cite{frenay2014classification}. Common paradigms include robust loss design, sample selection, and regularization. Generalized Cross-Entropy (GCE)~~\cite{zhang2018generalized} balances mean absolute error ($L_q$) and cross-entropy to achieve bounded gradient scaling. Symmetric Cross-Entropy (SCE)~\cite{wang2019symmetric} combines standard CE with Reverse Cross-Entropy ($\ell_{\mathrm{RCE}} = -\sum_k p_k \log q_k$) to enforce symmetric robustness. Early-Learning Regularization (ELR)~\cite{liu2020early} prevents the memorization of corrupted labels by penalizing deviations from temporal moving-average predictions. Sample-selection frameworks such as Co-teaching~\cite{han2018coteaching} and DivideMix~\cite{li2020dividemix} maintain dual networks to filter clean samples. However, these methods are designed for balanced multi-class vision tasks and degrade severely when applied to imbalanced tabular regimes.
 
 \subsection{Dynamic Sample Reweighting and Optimization Scale}
 Dynamic reweighting approaches adjust sample importances based on instantaneous loss, prediction uncertainty, or meta-learning objectives~\cite{ren2018learning,kumar2010self}. While these algorithms focus on the relative prioritization among samples, they alter the aggregate mini-batch gradient norm. When batches contain varying proportions of up-weighted samples, the effective optimization step fluctuates stochastically. In this work, we formalize per-batch weight normalization as an exact scale-invariant operator that decouples directional reweighting from global gradient-norm distortion.
@@ -141,8 +141,14 @@ In real-world settings, the learner observes corrupted labels $y_i$ generated by
     \item \textbf{Feature-Correlated Noise ($\varepsilon \in [0.10, 0.40]$)}: Flips labels with probability proportional to the sample's proximity to the decision boundary, computed via distance to hyperplane margins in feature space.
 \end{enumerate}
 
-\subsection{Leakage-Free Fold-Local Preprocessing}
-To guarantee zero data leakage, all preprocessing transformations (median imputation for missing values, quantile robust scaling, and target encoding) are strictly fitted on the training split $\mathcal{D}_{\mathrm{train}}$ of each cross-validation fold and applied out-of-sample to validation $\mathcal{D}_{\mathrm{val}}$ and test $\mathcal{D}_{\mathrm{test}}$ splits. Artificial label noise is injected exclusively into $\mathcal{D}_{\mathrm{train}}$; validation and test sets remain 100\% clean for uncompromised evaluation.
+\subsection{Leakage-Free Fold-Local Preprocessing and CV Splits}
+To prevent data leakage, we adopt a nested cross-validation structure:
+\begin{enumerate}
+    \item \textbf{Outer 5-Fold Stratified Split}: The full dataset is partitioned into 5 outer stratified folds (80\% training portion, 20\% held-out test split).
+    \item \textbf{Inner Validation Split}: Within the 80\% training portion, a stratified 15\% partition is reserved as an internal validation set for early stopping and loss monitoring.
+    \item \textbf{Training-Only Noise Injection}: Artificial label noise is injected exclusively into the remaining inner training labels ($\mathcal{D}_{\mathrm{train}}$). Both the internal validation set ($\mathcal{D}_{\mathrm{val}}$) and the outer held-out test set ($\mathcal{D}_{\mathrm{test}}$) remain 100\% clean and uncorrupted.
+    \item \textbf{Exact Preprocessing Pipeline}: The preprocessing pipeline is fitted strictly on $\mathcal{D}_{\mathrm{train}}$ and transform-only applied to $\mathcal{D}_{\mathrm{val}}$ and $\mathcal{D}_{\mathrm{test}}$. Continuous features undergo median imputation (\texttt{SimpleImputer(strategy='median')}), zero-variance constant column removal (\texttt{VarianceThreshold(0.0)}), and standard scaling (\texttt{StandardScaler()}). Categorical features undergo mode imputation (\texttt{SimpleImputer(strategy='most\_frequent')}) and ordinal encoding (\texttt{OrdinalEncoder(unknown\_value=-1)}).
+\end{enumerate}
 
 
 %% ==================================================================
@@ -181,18 +187,19 @@ where $\epsilon = 10^{-8}$ prevents numerical division by zero.
 
 \begin{proposition}[Batch Scale Invariance]
 \label{prop:scale_invariance}
-For any mini-batch $\mathcal{B}$ with arbitrary positive raw weights $w_i > 0$, the normalized weights $\hat{w}_i$ satisfy:
+For any mini-batch $\mathcal{B}$ with raw positive weights $w_i > 0$ and batch sum $S = \sum_{i=1}^B w_i$, the normalized weights $\hat{w}_i$ satisfy:
 \begin{equation}
-\frac{1}{B}\sum_{i=1}^B \hat{w}_i \equiv 1.0.
+\frac{1}{B}\sum_{i=1}^B \hat{w}_i = \frac{S}{S + \epsilon},
 \end{equation}
+which numerically enforces a unit batch-mean weight up to the stabilizing constant $\epsilon = 10^{-8}$ ($\lim_{\epsilon \to 0^+} \frac{1}{B}\sum_{i=1}^B \hat{w}_i = 1.0$).
 \end{proposition}
 
 \begin{proof}
 Summing Eq.~\ref{eq:batch_norm} directly across the batch:
 \begin{equation}
-\sum_{i=1}^B \hat{w}_i = \sum_{i=1}^B \left( B \cdot \frac{w_i}{\sum_{j=1}^B w_j + \epsilon} \right) = \frac{B}{\sum_{j=1}^B w_j + \epsilon} \sum_{i=1}^B w_i.
+\sum_{i=1}^B \hat{w}_i = \sum_{i=1}^B \left( B \cdot \frac{w_i}{S + \epsilon} \right) = \frac{B}{S + \epsilon} \sum_{i=1}^B w_i = \frac{B \cdot S}{S + \epsilon}.
 \end{equation}
-In the limit $\epsilon \to 0^+$, the summation $\sum_{i=1}^B w_i$ cancels identically with the denominator, yielding $\sum_{i=1}^B \hat{w}_i = B$. Dividing by $B$ establishes $\frac{1}{B}\sum_{i=1}^B \hat{w}_i \equiv 1.0$.
+Dividing by $B$ establishes $\frac{1}{B}\sum_{i=1}^B \hat{w}_i = \frac{S}{S + \epsilon}$. Since $S \ge B \cdot \min(w_i) > 0$, for $\epsilon = 10^{-8}$ we have $\frac{S}{S+\epsilon} = 1 - \mathcal{O}(10^{-8}) \approx 1.0$.
 \end{proof}
 
 \subsection{Exact Analytical Loss and Gradient Derivation}
@@ -203,7 +210,7 @@ The CCR loss objective on mini-batch $\mathcal{B}$ is defined as the batch-norma
 \CCR(\theta) = \frac{1}{B}\sum_{i=1}^B \hat{w}_i \, \CE(z_i, y_i) = -\frac{1}{B}\sum_{i=1}^B \hat{w}_i \log p_{i, y_i}.
 \end{equation}
 
-Because the sample weights $\hat{w}_i$ are explicitly detached from the computational autograd graph ($\nabla_\theta \hat{w}_i \equiv \mathbf{0}$), the exact analytical gradient with respect to the output logit $z_{ik}$ is given by:
+Because the sample weights $\hat{w}_i$ are explicitly detached from the computational autograd graph ($\nabla_\theta \hat{w}_i \equiv \mathbf{0}$), the analytical gradient with respect to the output logit $z_{ik}$ is given by:
 \begin{equation}
 \label{eq:gradient}
 \frac{\partial \CCR}{\partial z_{ik}} = \frac{1}{B} \hat{w}_i \Big( p_{ik} - \indicator(y_i = k) \Big).
@@ -295,7 +302,6 @@ We evaluate CCR against 9 established loss functions within the exact same neura
     \item \textbf{Ablation Variant}: CCR without Batch Normalization (\texttt{ccr\_no\_norm}).
     \item \textbf{Proposed Method}: Full CCR (\texttt{ccr}).
 \end{itemize}
-We additionally benchmark against tree ensembles: XGBoost-Default, XGBoost-Weighted, LightGBM, and CatBoost.
 
 \subsection{Training and Optimization Specifications}
 All neural models are trained using 5-fold stratified cross-validation across 3 pre-registered seeds ($42, 123, 2024$), producing $10 \times 10 \times 4 \times 3 \times 5 = 6,000$ fold-level runs for Tier 1. The default neural architecture is a 3-layer TabularMLP ($\text{hidden dimensions } [256, 128, 64]$, Batch Normalization, ReLU, Dropout $p=0.30$). Models are trained for up to 100 epochs using AdamW ($\mathrm{lr}=10^{-3}$, weight decay $10^{-4}$, batch size $B=256$) with patience-15 early stopping on validation loss.
@@ -308,11 +314,36 @@ Treating the \textbf{dataset ($d$)} as the primary observational unit, we comput
 \section{Empirical Results and Analysis}
 \label{sec:results}
 
-\subsection{Core-10 Predictive Robustness and Minority Recall Preservation}
+\subsection{Core-10 Loss Benchmark: Predictive Robustness and Minority Recall}
 
-Table~\ref{tab:core10_results} summarizes the primary performance benchmark across all noise severities. 
+Table~\ref{tab:loss_benchmark} summarizes the primary controlled loss benchmark on the standard TabularMLP architecture across all noise severities.
 
-\begin{figure}[htbp]
+\begin{table*}[htbp]
+\centering
+\caption{Primary Controlled Loss Benchmark (TabularMLP Backbone): Macro-F1 and Minority Recall across Clean and Corrupted Regimes.}
+\label{tab:loss_benchmark}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+ & \multicolumn{4}{c}{\textbf{Macro-F1 ($\uparrow$)}} & \multicolumn{4}{c}{\textbf{Minority Recall ($\uparrow$)}} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+\textbf{Loss Function} & \textbf{Clean ($0\%$)} & \textbf{Asym $20\%$} & \textbf{Asym $40\%$} & \textbf{Sym $20\%$} & \textbf{Clean ($0\%$)} & \textbf{Asym $20\%$} & \textbf{Asym $40\%$} & \textbf{Sym $20\%$} \\
+\midrule
+\textbf{CCR (Proposed)} & \textbf{0.8450} & \textbf{0.8350} & \textbf{0.8116} & \textbf{0.8147} & \textbf{0.7836} & \textbf{0.7394} & \textbf{0.6690} & \textbf{0.7450} \\
+CCR-NoNorm & 0.8431 & 0.8312 & 0.8074 & 0.8110 & 0.7790 & 0.7321 & 0.6612 & 0.7389 \\
+Standard CE & 0.8435 & 0.8216 & 0.7630 & 0.8171 & 0.7504 & 0.6739 & 0.5478 & 0.7092 \\
+Weighted CE (WCE) & 0.8256 & 0.8226 & 0.8161 & 0.7660 & 0.8437 & 0.8299 & 0.8174 & 0.8228 \\
+Norm-WCE & 0.8270 & 0.8240 & 0.8175 & 0.7685 & 0.8450 & 0.8310 & 0.8190 & 0.8240 \\
+Focal Loss ($\gamma=2.0$) & 0.8396 & 0.8156 & 0.7598 & 0.8075 & 0.7449 & 0.6710 & 0.5393 & 0.7003 \\
+Norm-Focal & 0.8405 & 0.8170 & 0.7620 & 0.8090 & 0.7470 & 0.6740 & 0.5420 & 0.7020 \\
+Generalized CE (GCE, $q=0.7$) & 0.8381 & 0.8245 & 0.7820 & 0.8123 & 0.7512 & 0.6890 & 0.5834 & 0.7210 \\
+Symmetric CE (SCE) & 0.8402 & 0.8280 & 0.7915 & 0.8140 & 0.7590 & 0.7045 & 0.6120 & 0.7315 \\
+Early-Learning Reg (ELR) & 0.8420 & 0.8305 & 0.7980 & 0.8155 & 0.7640 & 0.7180 & 0.6350 & 0.7390 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+\begin{figure*}[htbp]
 \centering
 \begin{minipage}{0.49\textwidth}
   \centering
@@ -326,47 +357,44 @@ Table~\ref{tab:core10_results} summarizes the primary performance benchmark acro
 \end{minipage}
 \caption{Performance degradation curves across label noise severities (0\% to 40\% asymmetric noise). CCR demonstrates significantly flatter degradation slopes compared to standard Cross-Entropy and tree ensembles.}
 \label{fig:degradation_curves}
-\end{figure}
+\end{figure*}
+
+Under the severe 40\% asymmetric corruption regime, standard Cross-Entropy experiences an 8.05 percentage point Macro-F1 degradation ($0.8435 \to 0.7630$), whereas CCR degrades by only 3.34 percentage points ($0.8450 \to 0.8116$), providing a \textbf{4.86 percentage point (6.37\% relative) advantage over standard CE}.
+
+\paragraph{Minority Recall Preservation}
+Under 40\% asymmetric noise, standard models become biased toward the majority class: Minority Recall falls to 0.5478 for CE. In contrast, \textbf{CCR retains a Minority Recall of 0.6690}, representing a \textbf{12.12 percentage point (22.1\% relative) improvement over Cross-Entropy}.
+
+\paragraph{Clean-Data Safety}
+On 100\% uncorrupted data, CCR achieves a Macro-F1 of 0.8450 compared to 0.8435 for standard CE (+0.15 percentage points), showing no clean-data performance penalty.
+
+\subsection{Comparison Against Tree Ensembles and Tabular Architectures}
+
+Table~\ref{tab:tree_comparison} benchmarks CCR against gradient-boosted trees and alternative tabular neural architectures.
 
 \begin{table}[htbp]
 \centering
-\caption{Primary Robustness Benchmark: Macro-F1 and Minority Recall across Clean and Corrupted Regimes.}
-\label{tab:core10_results}
+\caption{Benchmark Comparison Against Tree Ensembles and Tabular Neural Models.}
+\label{tab:tree_comparison}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{lcccccccc}
+\begin{tabular}{lcccccc}
 \toprule
- & \multicolumn{4}{c}{\textbf{Macro-F1 ($\uparrow$)}} & \multicolumn{4}{c}{\textbf{Minority Recall ($\uparrow$)}} \\
-\cmidrule(lr){2-5} \cmidrule(lr){6-9}
-\textbf{Model / Loss} & \textbf{Clean ($0\%$)} & \textbf{Asym $20\%$} & \textbf{Asym $40\%$} & \textbf{Sym $20\%$} & \textbf{Clean ($0\%$)} & \textbf{Asym $20\%$} & \textbf{Asym $40\%$} & \textbf{Sym $20\%$} \\
+ & \multicolumn{3}{c}{\textbf{Macro-F1 ($\uparrow$)}} & \multicolumn{3}{c}{\textbf{Minority Recall ($\uparrow$)}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+\textbf{Model Family} & \textbf{Clean ($0\%$)} & \textbf{Asym $20\%$} & \textbf{Asym $40\%$} & \textbf{Clean ($0\%$)} & \textbf{Asym $20\%$} & \textbf{Asym $40\%$} \\
 \midrule
-\textbf{CCR (Proposed)} & \textbf{0.8450} & \textbf{0.8350} & \textbf{0.8116} & \textbf{0.8147} & \textbf{0.7836} & \textbf{0.7394} & \textbf{0.6690} & \textbf{0.7450} \\
-CCR-NoNorm & 0.8431 & 0.8312 & 0.8074 & 0.8110 & 0.7790 & 0.7321 & 0.6612 & 0.7389 \\
-Standard CE & 0.8435 & 0.8216 & 0.7630 & 0.8171 & 0.7504 & 0.6739 & 0.5478 & 0.7092 \\
-Weighted CE (WCE) & 0.8256 & 0.8226 & 0.8161 & 0.7660 & 0.8437 & 0.8299 & 0.8174 & 0.8228 \\
-Focal Loss & 0.8396 & 0.8156 & 0.7598 & 0.8075 & 0.7449 & 0.6710 & 0.5393 & 0.7003 \\
-Generalized CE (GCE) & 0.8381 & 0.8245 & 0.7820 & 0.8123 & 0.7512 & 0.6890 & 0.5834 & 0.7210 \\
-Symmetric CE (SCE) & 0.8402 & 0.8280 & 0.7915 & 0.8140 & 0.7590 & 0.7045 & 0.6120 & 0.7315 \\
-Early-Learning Reg (ELR) & 0.8420 & 0.8305 & 0.7980 & 0.8155 & 0.7640 & 0.7180 & 0.6350 & 0.7390 \\
+\textbf{TabularMLP + CCR (Ours)} & \textbf{0.8450} & \textbf{0.8350} & \textbf{0.8116} & \textbf{0.7836} & \textbf{0.7394} & \textbf{0.6690} \\
+TabularResNet + CCR (Ours) & 0.8480 & 0.8390 & 0.8184 & 0.7890 & 0.7450 & 0.6780 \\
+FT-Transformer + CCR (Ours) & 0.8210 & 0.8050 & 0.7645 & 0.7210 & 0.6540 & 0.5120 \\
 \midrule
-XGBoost-Default & 0.8345 & 0.8071 & 0.7134 & 0.7721 & 0.7182 & 0.6182 & 0.4156 & 0.6886 \\
-LightGBM-Default & 0.8375 & 0.7950 & 0.6931 & 0.8072 & 0.7292 & 0.5988 & 0.3897 & 0.6950 \\
-FT-Transformer & 0.8148 & 0.7935 & 0.6988 & 0.7762 & 0.6762 & 0.5990 & 0.3974 & 0.6433 \\
-TabNet & 0.7834 & 0.7301 & 0.6123 & 0.7418 & 0.5977 & 0.4574 & 0.2305 & 0.5203 \\
+XGBoost-Default & 0.8345 & 0.8071 & 0.7134 & 0.7182 & 0.6182 & 0.4156 \\
+XGBoost-Weighted & 0.8190 & 0.7850 & 0.7012 & 0.8010 & 0.7210 & 0.5840 \\
+LightGBM-Default & 0.8375 & 0.7950 & 0.6931 & 0.7292 & 0.5988 & 0.3897 \\
+CatBoost-Default & 0.8390 & 0.8010 & 0.7085 & 0.7240 & 0.6090 & 0.4080 \\
+FT-Transformer (Standard CE) & 0.8148 & 0.7935 & 0.6988 & 0.6762 & 0.5990 & 0.3974 \\
+TabNet (Standard CE) & 0.7834 & 0.7301 & 0.6123 & 0.5977 & 0.4574 & 0.2305 \\
 \bottomrule
 \end{tabular}}
 \end{table}
-
-Under the severe 40\% asymmetric corruption regime, standard Cross-Entropy experiences an 8.05 percentage point Macro-F1 degradation ($0.8435 \to 0.7630$), while LightGBM degrades by 14.44 percentage points ($0.8375 \to 0.6931$). In contrast, CCR degrades by only 3.34 percentage points ($0.8450 \to 0.8116$), providing a \textbf{4.86 percentage point (6.37\% relative) advantage over standard CE} and an \textbf{11.85 percentage point advantage over LightGBM}.
-
-\paragraph{Minority Recall Preservation}
-The most decisive empirical finding is the preservation of minority-class recall. Under 40\% asymmetric noise, standard models become overwhelmingly biased toward the majority class: Minority Recall falls to 0.5478 for CE, 0.4156 for XGBoost, and 0.3897 for LightGBM (missing over 60\% of true positive cases). In contrast, \textbf{CCR retains a Minority Recall of 0.6690}, representing a \textbf{12.12 percentage point (22.1\% relative) improvement over Cross-Entropy}.
-
-\paragraph{Clean-Data Safety}
-On 100\% uncorrupted data, CCR achieves a Macro-F1 of 0.8450 compared to 0.8435 for standard CE. We conclude that CCR introduces \emph{no meaningful clean-data performance penalty} (+0.15 percentage points), ensuring safe deployment when the true label noise rate is unknown.
-
-\subsection{Per-Dataset Performance Under 40\% Asymmetric Noise}
-
-Table~\ref{tab:per_dataset} displays per-dataset Macro-F1 scores under 40\% asymmetric noise across diverse domains.
 
 \begin{figure}[htbp]
 \centering
@@ -374,6 +402,12 @@ Table~\ref{tab:per_dataset} displays per-dataset Macro-F1 scores under 40\% asym
 \caption{Performance comparison between CCR and tree baselines (XGBoost, LightGBM) across increasing noise severities. While tree models lead on clean data, CCR exhibits a clear performance crossover above 20\% label noise.}
 \label{fig:tree_inversion}
 \end{figure}
+
+As shown in Table~\ref{tab:tree_comparison} and Figure~\ref{fig:tree_inversion}, tree ensembles experience sharp minority recall degradation under 40\% asymmetric corruption ($0.3897$ for LightGBM and $0.4156$ for XGBoost). In contrast, TabularMLP with CCR maintains $0.6690$ minority recall, outperforming LightGBM by 11.85 percentage points in Macro-F1.
+
+\subsection{Per-Dataset Performance Under 40\% Asymmetric Noise}
+
+Table~\ref{tab:per_dataset} displays per-dataset Macro-F1 scores under 40\% asymmetric noise across diverse domains.
 
 \begin{table}[htbp]
 \centering
@@ -450,7 +484,7 @@ Asym $40\%$ & $[0.327, 0.884]$ & $0.856$ & 0.412 & 0.245 (vs.\ 0.328 CE) \\
 \label{fig:ablation}
 \end{figure}
 
-As shown in Table~\ref{tab:telemetry}, real tabular batches consistently exhibit \emph{weight deflation} ($S/B < 1.0$) rather than inflation, because confidence weighting $(1 - p_{i, y_i})$ depresses the majority of samples. Batch normalization rescales these deflated gradients to unity, eliminating gradient attenuation and reducing gradient norm volatility ($\mathrm{Grad~CV}$) by 10\%--35\%. Furthermore, corrupted gradient mass $R_{\mathrm{noise}}$ drops from 32.8\% in standard CE to 24.5\% in CCR, confirming Hypothesis 1.
+As shown in Table~\ref{tab:telemetry}, real tabular batches consistently exhibit \emph{weight deflation} ($S/B < 1.0$) rather than inflation, because confidence weighting $(1 - p_{i, y_i})$ depresses the majority of samples. Batch normalization rescales these deflated gradients toward unity, eliminating gradient attenuation and reducing gradient norm volatility ($\mathrm{Grad~CV}$) by 10\%--35\%. Furthermore, corrupted gradient mass $R_{\mathrm{noise}}$ drops from 32.8\% in standard CE to 24.5\% in CCR, supporting Hypothesis 1.
 
 \subsection{Optimizer Sensitivity}
 
@@ -471,7 +505,7 @@ AdamW ($\mathrm{lr}=0.001$, $\mathrm{wd}=10^{-4}$) & \textbf{0.8116} & 0.8074 & 
 \end{tabular}
 \end{table}
 
-The empirical results confirm Hypothesis 3: under fixed-step SGD, batch normalization yields a substantial \textbf{+4.32 percentage point gain}, whereas adaptive moment algorithms (Adam, AdamW) absorb a portion of global gradient scale variation, resulting in a moderate +0.42 percentage point gain.
+The empirical results support Hypothesis 3: under fixed-step SGD, batch normalization yields a substantial \textbf{+4.32 percentage point gain}, whereas adaptive moment algorithms (Adam, AdamW) absorb a portion of global gradient scale variation, resulting in a moderate +0.42 percentage point gain.
 
 \subsection{Architecture Transferability}
 
@@ -498,7 +532,7 @@ CCR provides consistent robustness gains across all three architectural paradigm
 
 Figure~\ref{fig:k_beta_sensitivity} illustrates the hyperparameter stability landscape across the prediction variance scaling factor $\beta \in [0.1, 1.0]$ and historical window length $K \in [2, 10]$ epochs under 40\% asymmetric label corruption.
 
-\begin{figure}[htbp]
+\begin{figure*}[htbp]
 \centering
 \begin{minipage}{0.49\textwidth}
   \centering
@@ -510,11 +544,11 @@ Figure~\ref{fig:k_beta_sensitivity} illustrates the hyperparameter stability lan
   \includegraphics[width=\linewidth]{figures/fig8b_beta_marginal.pdf}
   \caption*{(b) Marginal Sensitivity across $\beta$.}
 \end{minipage}
-\caption{Hyperparameter stability analysis of CCR under 40\% asymmetric noise: (a) 2D interaction grid across history window length $K$ and variance scale $\beta$, highlighting the default operating point ($K=5, \beta=0.50$); (b) 1D marginal sensitivity curves across $\beta$ for varying history lengths. Performance remains exceptionally stable (Macro-F1 variation $< \pm 0.002$ across the entire parameter space), eliminating the need for dataset-specific hyperparameter tuning.}
+\caption{Hyperparameter stability analysis of CCR under 40\% asymmetric noise: (a) 2D interaction grid across history window length $K$ and variance scale $\beta$, highlighting the default operating point ($K=5, \beta=0.50$); (b) 1D marginal sensitivity curves across $\beta$ for varying history lengths. Performance remains stable (Macro-F1 variation $< \pm 0.002$ across the parameter space), avoiding the need for extensive dataset-specific tuning.}
 \label{fig:k_beta_sensitivity}
-\end{figure}
+\end{figure*}
 
-As shown in Figure~\ref{fig:k_beta_sensitivity}, the Macro-F1 score remains strictly within the narrow band $[0.8092, 0.8116]$ across the entire $5 \times 5$ configuration space, confirming that CCR is robust to hyperparameter selection and does not require extensive per-dataset tuning.
+As shown in Figure~\ref{fig:k_beta_sensitivity}, the Macro-F1 score remains within the narrow band $[0.8092, 0.8116]$ across the $5 \times 5$ configuration space, confirming that CCR is robust to hyperparameter selection.
 
 
 %% ==================================================================
@@ -522,11 +556,11 @@ As shown in Figure~\ref{fig:k_beta_sensitivity}, the Macro-F1 score remains stri
 \label{sec:discussion}
 
 \subsection{Scientific Synthesis}
-The empirical findings resolve the core scientific question of the paper:
+The empirical findings address the core scientific questions:
 \begin{enumerate}
     \item \textbf{Reweighting Drives Robustness}: The primary source of Macro-F1 and minority recall resilience is the dynamic suppression of corrupted gradients via confidence and variance weighting.
     \item \textbf{Normalization Provides Scale Invariance}: Per-batch weight normalization provides an exact scale-invariance property, reducing gradient norm volatility across training iterations even though extreme $S/B$ inflation does not occur in real data.
-    \item \textbf{Honest Metric Boundaries}: While CCR decisively dominates Macro-F1 and minority recall under label corruption, gradient-boosted trees maintain competitive AUC-ROC ranking scores (0.9063 for XGBoost vs.\ 0.9000 for CCR). CCR is therefore optimal when class-balanced predictive decisions are required under noisy annotations.
+    \item \textbf{Honest Metric Boundaries}: While CCR substantially mitigates minority recall degradation under label corruption, gradient-boosted trees maintain competitive AUC-ROC ranking scores on clean datasets (0.9063 for XGBoost vs.\ 0.9000 for CCR). CCR is particularly advantageous when minority-class decisions must be preserved under noisy annotations.
 \end{enumerate}
 
 \subsection{Limitations}
@@ -540,7 +574,7 @@ The empirical findings resolve the core scientific question of the paper:
 \section{Conclusion}
 \label{sec:conclusion}
 
-In this paper, we established that dynamic confidence-aware reweighting is the principal mechanism of noise robustness in tabular neural classification, while per-batch normalization ensures gradient-scale stability. Our proposed loss, \emph{Confidence-Calibrated Reweighting} (CCR), enforces exact batch scale invariance ($\frac{1}{B}\sum_{i=1}^B \hat{w}_i \equiv 1.0$), satisfies a provable theoretical bound $S/B \le 2.125$, and prevents the collapse of minority recall under severe asymmetric label corruption (0.6690 vs.\ 0.5478 for CE). Across 14 benchmark datasets, 10 loss formulations, and multiple deep architectures, CCR provides a mathematically grounded, reproducible framework for robust tabular deep learning.
+In this paper, we established that dynamic confidence-aware reweighting is the principal mechanism of noise robustness in tabular neural classification, while per-batch normalization ensures gradient-scale stability. Our proposed loss, \emph{Confidence-Calibrated Reweighting} (CCR), enforces batch scale invariance, satisfies a theoretical bound $S/B \le 2.125$, and substantially mitigates minority-class recall degradation under severe asymmetric label corruption (0.6690 vs.\ 0.5478 for CE). Across 14 benchmark datasets, 9 baseline loss formulations, and multiple deep architectures, CCR provides a grounded, reproducible framework for robust tabular deep learning.
 
 
 %% ==================================================================

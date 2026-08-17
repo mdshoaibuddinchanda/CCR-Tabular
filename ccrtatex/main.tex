@@ -31,7 +31,7 @@
 
 \begin{frontmatter}
 
-\title{Confidence-Calibrated Reweighting with Invariant Batch Normalization for Robust Tabular Neural Classification}
+\title{When Reweighting Meets Scale Invariance: Robust Tabular Neural Classification Under Label Noise and Class Imbalance}
 
 \author[aff1]{Md Shoaib Uddin Chanda}
 \ead{mdshoaibuddinchanda@gmail.com}
@@ -59,6 +59,13 @@ tabular deep learning \sep label noise \sep class imbalance \sep dynamic sample 
 \label{sec:intro}
 
 Tabular data remains the foundation of high-stakes predictive systems across financial risk assessment, medical diagnosis, fraud detection, and industrial fault monitoring. In clean-data regimes with rotationally non-invariant feature structures, gradient-boosted decision trees (GBDTs) such as XGBoost~\cite{chen2016xgboost}, LightGBM~\cite{ke2017lightgbm}, and CatBoost~\cite{prokhorenkova2018catboost} have traditionally demonstrated superior empirical performance over deep neural networks~\cite{grinsztajn2022why,gorishniy2021revisiting}. However, production tabular environments routinely depart from clean benchmark conditions: training datasets frequently suffer from concurrent \emph{class imbalance} (where positive events are rare) and \emph{asymmetric label noise} (where ambiguous or rare positive cases are systematically misannotated as negative)~\cite{frenay2014classification,he2009learning}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1_schematic.png}
+\caption{Overview of the Confidence-Calibrated Reweighting (CCR) end-to-end training and evaluation framework. Raw tabular records undergo stratified cross-validation and fold-local preprocessing with noise injected strictly on training splits. Dynamic weights are computed via confidence-inverse penalties, historical prediction variance, and class balance, detached from autograd, and normalized per-batch ($\frac{1}{B}\sum \hat{w}_i \equiv 1.0$) to stabilize gradient updates prior to clean held-out evaluation.}
+\label{fig:schematic}
+\end{figure}
 
 \subsection{The Joint Failure Mode of Imbalance and Asymmetric Noise}
 
@@ -305,6 +312,22 @@ Treating the \textbf{dataset ($d$)} as the primary observational unit, we comput
 
 Table~\ref{tab:core10_results} summarizes the primary performance benchmark across all noise severities. 
 
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.49\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig1a_macro_f1.pdf}
+  \caption*{(a) Macro-F1 degradation curves.}
+\end{minipage}\hfill
+\begin{minipage}{0.49\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig1b_minority_recall.pdf}
+  \caption*{(b) Minority recall retention curves.}
+\end{minipage}
+\caption{Performance degradation curves across label noise severities (0\% to 40\% asymmetric noise). CCR demonstrates significantly flatter degradation slopes compared to standard Cross-Entropy and tree ensembles.}
+\label{fig:degradation_curves}
+\end{figure}
+
 \begin{table}[htbp]
 \centering
 \caption{Primary Robustness Benchmark: Macro-F1 and Minority Recall across Clean and Corrupted Regimes.}
@@ -344,6 +367,13 @@ On 100\% uncorrupted data, CCR achieves a Macro-F1 of 0.8450 compared to 0.8435 
 \subsection{Per-Dataset Performance Under 40\% Asymmetric Noise}
 
 Table~\ref{tab:per_dataset} displays per-dataset Macro-F1 scores under 40\% asymmetric noise across diverse domains.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig4_ccr_vs_xgboost.pdf}
+\caption{Performance comparison between CCR and tree baselines (XGBoost, LightGBM) across increasing noise severities. While tree models lead on clean data, CCR exhibits a clear performance crossover above 20\% label noise.}
+\label{fig:tree_inversion}
+\end{figure}
 
 \begin{table}[htbp]
 \centering
@@ -412,6 +442,13 @@ Asym $40\%$ & $[0.327, 0.884]$ & $0.856$ & 0.412 & 0.245 (vs.\ 0.328 CE) \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\linewidth]{figures/fig6_ablation.pdf}
+\caption{Component ablation analysis across benchmark datasets. Dynamic confidence reweighting provides the primary Macro-F1 robustness jump, while batch normalization provides scale stabilization.}
+\label{fig:ablation}
+\end{figure}
 
 As shown in Table~\ref{tab:telemetry}, real tabular batches consistently exhibit \emph{weight deflation} ($S/B < 1.0$) rather than inflation, because confidence weighting $(1 - p_{i, y_i})$ depresses the majority of samples. Batch normalization rescales these deflated gradients to unity, eliminating gradient attenuation and reducing gradient norm volatility ($\mathrm{Grad~CV}$) by 10\%--35\%. Furthermore, corrupted gradient mass $R_{\mathrm{noise}}$ drops from 32.8\% in standard CE to 24.5\% in CCR, confirming Hypothesis 1.
 

@@ -13,9 +13,11 @@ catboost_info/
 *.pth
 *.pt
 
-# ── Submissions and Archives ──────────────────────────────────────────────────
+# ── Manuscript, Submissions, and Paper Artifacts ──────────────────────────────
+ccrtatex/
 NEUNET_EM_SUBMISSION/
 NEUNET_EM_SUBMISSION.zip
+manuscript_experiment_results_and_theory.md
 *.zip
 *.tar.gz
 

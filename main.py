@@ -888,7 +888,8 @@ def main() -> None:
     parser.add_argument("--optimizer_study", action="store_true", help="Run SGD vs Adam vs AdamW comparison.")
     parser.add_argument("--compute_benchmark", action="store_true", help="Run computational cost & VRAM profiling.")
     parser.add_argument("--canonical", action="store_true", help="Consolidate canonical master results store.")
-    parser.add_argument("--figures", action="store_true", help="Generate all publication and supplementary figures.")
+    parser.add_argument("--figures", action="store_true", help="Generate all 7 publication figures (600 DPI vector PDF + PNG).")
+    parser.add_argument("--tables", action="store_true", help="Generate all 8 publication tables (CSV and LaTeX).")
     parser.add_argument("--smoke_test", action="store_true", help="Run quick 2-fold diagnostic smoke test.")
     parser.add_argument("--smoke_test_transformer", action="store_true", help="Run 1-fold FT-Transformer smoke test on Adult with 40% noise.")
 
@@ -916,8 +917,12 @@ def main() -> None:
         run_scientific_validation()
 
     elif args.figures:
-        from src.analysis.generate_paper_figures import generate_all_figures
-        generate_all_figures()
+        import subprocess
+        subprocess.run([sys.executable, str(_ROOT / "scripts" / "generate_all_paper_figures.py")], check=True)
+
+    elif args.tables:
+        from scripts.generate_all_paper_tables import generate_all_tables
+        generate_all_tables()
 
     elif args.dry_run:
         target = ["tier1", "tier3", "tier4", "tier5"]

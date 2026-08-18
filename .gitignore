@@ -3,10 +3,23 @@ data/raw/
 data/processed/
 data/noisy/
 
-# ── All generated outputs ─────────────────────────────────────────────────────
+# ── Generated outputs and results ─────────────────────────────────────────────
 outputs/
+results/
+ccr-result/
+catboost_info/
+*.log
+*.sqlite
+*.pth
+*.pt
 
-# ── Python ────────────────────────────────────────────────────────────────────
+# ── Submissions and Archives ──────────────────────────────────────────────────
+NEUNET_EM_SUBMISSION/
+NEUNET_EM_SUBMISSION.zip
+*.zip
+*.tar.gz
+
+# ── Python & Environments ─────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -17,6 +30,10 @@ dist/
 *.egg-info/
 *.egg
 .eggs/
+.env
+.venv
+env/
+venv/
 
 # ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
@@ -27,9 +44,11 @@ dist/
 .coverage
 htmlcov/
 
-# ── IDEs ──────────────────────────────────────────────────────────────────────
+# ── IDEs & Scratch ────────────────────────────────────────────────────────────
 .vscode/
 .idea/
+.tempmediaStorage/
+scratch/
 *.swp
 *.swo
 *~
@@ -41,8 +60,7 @@ Thumbs.db
 # ── OpenML cache ──────────────────────────────────────────────────────────────
 .openml/
 
-# ── Internal files — not for public repo ─────────────────────────────────────
-CLAUDE.md
+# ── Internal project tracking ─────────────────────────────────────────────────
 PROGRESS.md
+CLAUDE.md
 scripts/show_results.py
-catboost_info/
